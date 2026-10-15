@@ -106,6 +106,9 @@ async def prepare_next_gis_company(telethon_client) -> dict | None:
 
 async def approve_and_send_cold_message(telethon_client, company_id: int, anti_ban) -> bool:
     """Отправляет одобренное холодное сообщение."""
+    if (await db.get_setting("outbound_paused")) == "1":
+        logger.warning("Холодная отправка заблокирована: исходящие выключены владельцем")
+        return False
     if not await anti_ban.can_send_cold():
         logger.warning("Лимиты холодного обхода исчерпаны")
         return False

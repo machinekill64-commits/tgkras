@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from telethon import TelegramClient, events, connection
 from telethon.tl.custom import Message
+from telethon.tl import types as tl_types
 from config import (TG_API_ID, TG_API_HASH, TG_PHONE, TG_SESSION_NAME,
                     TG_MTPROTO_HOST, TG_MTPROTO_PORT, TG_MTPROTO_SECRET,
                     TG_PROXY_TYPE, TG_PROXY_HOST, TG_PROXY_PORT,
@@ -15,9 +16,74 @@ from config import (TG_API_ID, TG_API_HASH, TG_PHONE, TG_SESSION_NAME,
                     COLD_LEAD_ENABLED, FOLLOWUP_MAX)
 import database as db
 from anti_ban import AntiBan
-from lead_detector import detect_lead, detect_cold_lead
+from lead_qualification import qualify_lead
 
 logger = logging.getLogger(__name__)
+
+_text_contact_pattern = re.compile(
+    r"(?i)(?:пишите|контакт|связь|связаться|обращаться|contact)\s*[:\-—]?\s*@([A-Za-z0-9_]{5,32})"
+    r"|(?:t\.me|telegram\.me)/([A-Za-z0-9_]{5,32})"
+)
+
+
+def _active_usernames(entity) -> list[str]:
+    """Основной и активные дополнительные username сущности."""
+    names = []
+    primary = getattr(entity, "username", None)
+    if primary:
+        names.append(primary)
+    for alias in getattr(entity, "usernames", None) or []:
+        name = getattr(alias, "username", None)
+        if name and getattr(alias, "active", True) and name not in names:
+            names.append(name)
+    return names
+
+
+def _sender_metadata(sender, text: str) -> dict:
+    """Безопасно извлекает данные об отправителе и контакте из текста."""
+    sender_id = getattr(sender, "id", None)
+    sender_name = (getattr(sender, "first_name", "") or
+                   getattr(sender, "title", "") or "Unknown")
+    usernames = _active_usernames(sender) if sender else []
+    sender_username = usernames[0] if usernames else None
+
+    if sender is None:
+        sender_type = "unknown"
+    elif isinstance(sender, tl_types.User):
+        sender_type = "bot" if getattr(sender, "bot", False) else "user"
+    else:
+        sender_type = "channel"
+
+    contact_username = None
+    contact_source = None
+    if sender_username:
+        contact_username, contact_source = sender_username, "author"
+    m = _text_contact_pattern.search(text or "")
+    if m:
+        text_contact = m.group(1) or m.group(2)
+        if text_contact and text_contact.lower() != (sender_username or "").lower():
+            if not contact_username:
+                contact_username, contact_source = text_contact, "text"
+
+    return {
+        "sender_id": sender_id,
+        "sender_name": sender_name,
+        "sender_username": sender_username,
+        "sender_type": sender_type,
+        "contact_username": contact_username,
+        "contact_source": contact_source,
+    }
+
+
+def _source_url(chat_entity, chat_id: int, message_id: int) -> str | None:
+    """Ссылка на исходное сообщение: public-чат или private supergroup."""
+    usernames = _active_usernames(chat_entity)
+    if usernames:
+        return f"https://t.me/{usernames[0]}/{message_id}"
+    marked = str(chat_id or "")
+    if marked.startswith("-100"):
+        return f"https://t.me/c/{marked[4:]}/{message_id}"
+    return None
 
 
 def _build_telegram_client() -> TelegramClient:
@@ -68,6 +134,7 @@ class UserClient:
         self._paused = False
         self._me_id: int | None = None
         self._ai_semaphore = asyncio.Semaphore(5)
+        self._lead_semaphore = asyncio.Semaphore(2)
         self._dialog_locks: dict[int, asyncio.Lock] = {}
         # Дебаунс сообщений: ждём пока клиент допишет серию сообщений
         self._dialog_timers: dict[int, asyncio.TimerHandle] = {}
@@ -80,24 +147,30 @@ class UserClient:
 
     @property
     def is_paused(self) -> bool:
-        """Бот на паузе — не обрабатывает новые сообщения и не отправляет."""
+        """Исходящие сообщения заблокированы владельцем (мониторинг продолжает работать)."""
         return self._paused
 
     async def pause(self):
-        """Поставить бота на паузу (не обрабатывает новые сообщения)."""
+        """Заблокировать исходящие сообщения (сохраняется в БД, переживает рестарт)."""
         self._paused = True
-        logger.info("Бот поставлен на паузу владельцем")
+        await db.set_setting("outbound_paused", "1")
+        logger.info("Исходящие сообщения заблокированы владельцем (мониторинг активен)")
 
     async def resume(self):
-        """Снять бота с паузы."""
+        """Снять блокировку исходящих сообщений."""
         self._paused = False
-        logger.info("Бот снят с паузы владельцем")
+        await db.set_setting("outbound_paused", "0")
+        logger.info("Блокировка исходящих сообщений снята владельцем")
 
     async def start(self):
         """Запуск клиента и авторизация."""
         await self.client.start(phone=TG_PHONE)
         me = await self.client.get_me()
         logger.info(f"Рабочий аккаунт: {me.first_name} (@{me.username}, ID: {me.id})")
+
+        self._paused = (await db.get_setting("outbound_paused")) == "1"
+        if self._paused:
+            logger.warning("Исходящие сообщения заблокированы (outbound_paused=1) — только мониторинг")
 
         await self.anti_ban.init_warmup()
         await self._load_monitored_chats()
@@ -125,8 +198,6 @@ class UserClient:
         @self.client.on(events.NewMessage())
         async def on_new_message(event):
             """Обработка нового сообщения в чате."""
-            if self._paused:
-                return
             chat_id = event.chat_id
             if chat_id not in self._monitored_chat_ids:
                 return
@@ -141,8 +212,6 @@ class UserClient:
         @self.client.on(events.NewMessage(incoming=True))
         async def on_private_message(event):
             """Обработка входящих личных сообщений (ответы клиентов в диалогах)."""
-            if self._paused:
-                return
             if event.is_private:
                 if event.sender_id == self._me_id:
                     return
@@ -151,8 +220,6 @@ class UserClient:
         @self.client.on(events.NewMessage(outgoing=True))
         async def on_outgoing_message(event):
             """Перехват исходящих ЛС — если владелец пишет сам, бот останавливает диалог."""
-            if self._paused:
-                return
             if not event.is_private:
                 return
             # Это сообщение от нас (владельца) — проверяем, есть ли активный диалог
@@ -224,64 +291,69 @@ class UserClient:
         message = event.message
         text = message.text or ""
         sender = await event.get_sender()
+        meta = _sender_metadata(sender, text)
 
-        # Логируем сообщение
-        sender_name = getattr(sender, "first_name", "") or getattr(sender, "title", "Unknown")
-        await db.log_message(event.chat_id, sender.id, sender_name, text,
+        # Логируем сообщение (sender может быть None — анонимный админ/удалённый;
+        # в БД пишем 0, т.к. колонка NOT NULL в старой схеме)
+        sender_name = meta["sender_name"]
+        await db.log_message(event.chat_id, meta["sender_id"] or 0, sender_name, text,
                              message.id, "incoming")
 
         # Дедупликация спамеров: если тот же отправитель уже писал это же
         # сообщение в последние 24ч — пропускаем AI-классификацию (экономим квоту)
-        sender_is_bot = getattr(sender, "bot", False)
-        normalized = re.sub(r"\s+", " ", text.strip().lower())[:500]
-        text_hash = hashlib.md5(normalized.encode()).hexdigest()
-        spam_key = (sender.id, text_hash)
+        sender_is_bot = meta["sender_type"] == "bot"
+        normalized = re.sub(r"\s+", " ", text.strip().lower())
+        text_hash = hashlib.sha256(normalized.encode()).hexdigest()
+        spam_key = (meta["sender_id"] or event.chat_id, text_hash)
         now = time.time()
         # Чистим устаревшие записи раз в 100 сообщений
         if len(self._spam_cache) > 500:
             self._spam_cache = {k: v for k, v in self._spam_cache.items()
                                 if now - v < self._spam_cache_ttl}
-        if spam_key in self._spam_cache:
+        if spam_key in self._spam_cache and now - self._spam_cache[spam_key] < self._spam_cache_ttl:
             logger.info(f"Дубликат сообщения от {sender_name} (спам-кэш) — пропускаем AI")
             await db.update_message_verdict(event.chat_id, message.id, "spam_duplicate")
             return
         self._spam_cache[spam_key] = now
 
-        # Детекция лида (с семафором для AI-вызовов)
-        async with self._ai_semaphore:
-            result = await detect_lead(text, message.date, sender_is_bot)
-
+        # Квалификация лида — единственный финальный фильтр (семафор на AI-вызовы)
+        async with self._lead_semaphore:
+            result = await qualify_lead(text, message.date, sender_is_bot,
+                                        include_indirect=COLD_LEAD_ENABLED)
         if not result.is_lead:
-            if result.reason.startswith("level"):
-                logger.debug(f"L0/L1 отсеял: {text[:50]}...")
-            verdict = result.reason
-            # Пробуем найти холодного лида, если включено
-            if COLD_LEAD_ENABLED:
-                async with self._ai_semaphore:
-                    cold_result = await detect_cold_lead(text, message.date, sender_is_bot)
-                if cold_result.is_lead:
-                    await db.update_message_verdict(
-                        event.chat_id, message.id, f"cold_{cold_result.category}")
-                    await self._process_cold_lead(event, cold_result, text)
-                    return
-                verdict = f"{verdict}|cold:{cold_result.reason}"
-            await db.update_message_verdict(event.chat_id, message.id, verdict)
+            if result.reason == 'review_unavailable':
+                self._spam_cache.pop(spam_key, None)
+            await db.update_message_verdict(event.chat_id, message.id, result.reason)
+            return
+        if result.category == 'WARM_COLD':
+            await db.update_message_verdict(event.chat_id, message.id, 'cold_WARM_COLD')
+            await self._process_cold_lead(event, result, text)
             return
 
         # Лид найден — проверяем дубликат (тот же отправитель уже дал лид недавно)
-        if await db.has_recent_lead_from_sender(sender.id, hours=24):
+        if meta["sender_id"] and await db.has_recent_lead_from_sender(meta["sender_id"], hours=24):
             logger.info(f"Дубликат лида от {sender_name} (уже есть за 24ч) — пропускаем")
             await db.update_message_verdict(event.chat_id, message.id, "duplicate_lead")
             return
 
         chat_entity = await event.get_chat()
         chat_name = getattr(chat_entity, "title", str(event.chat_id))
-        sender_username = getattr(sender, "username", None)
+        sender_username = meta["sender_username"]
+        source_url = _source_url(chat_entity, event.chat_id, message.id)
+        lead_meta = {
+            "source_message_id": message.id,
+            "source_url": source_url,
+            "sender_type": meta["sender_type"],
+            "contact_username": meta["contact_username"],
+            "contact_source": meta["contact_source"],
+            "service": result.service,
+            "evidence": result.evidence,
+        }
 
         lead_id = await db.add_lead(
             chat_id=event.chat_id,
             chat_name=chat_name,
-            sender_id=sender.id,
+            sender_id=meta["sender_id"] or 0,
             sender_name=sender_name,
             sender_username=sender_username,
             message_text=text,
@@ -292,6 +364,7 @@ class UserClient:
             market_price=result.market_price,
             market_deadline=result.market_deadline,
             lead_score=result.lead_score,
+            **lead_meta,
         )
 
         logger.info(f"ЛИД #{lead_id} [{result.category}] от {sender_name} в чате {chat_name}")
@@ -312,21 +385,32 @@ class UserClient:
                 market_price=result.market_price,
                 market_deadline=result.market_deadline,
                 lead_score=result.lead_score,
-                sender_id=sender.id,
+                sender_id=meta["sender_id"],
+                **lead_meta,
             )
 
     async def _process_cold_lead(self, event, cold_result: 'LeadResult', text: str):
         """Сохраняет холодного лид и уведомляет владельца."""
         sender = await event.get_sender()
+        meta = _sender_metadata(sender, text)
         chat_entity = await event.get_chat()
         chat_name = getattr(chat_entity, "title", str(event.chat_id))
-        sender_name = getattr(sender, "first_name", "") or getattr(sender, "title", "Unknown")
-        sender_username = getattr(sender, "username", None)
+        sender_name = meta["sender_name"]
+        sender_username = meta["sender_username"]
+        lead_meta = {
+            "source_message_id": event.message.id,
+            "source_url": _source_url(chat_entity, event.chat_id, event.message.id),
+            "sender_type": meta["sender_type"],
+            "contact_username": meta["contact_username"],
+            "contact_source": meta["contact_source"],
+            "service": cold_result.service,
+            "evidence": cold_result.evidence,
+        }
 
         lead_id = await db.add_cold_lead(
             chat_id=event.chat_id,
             chat_name=chat_name,
-            sender_id=sender.id,
+            sender_id=meta["sender_id"] or 0,
             sender_name=sender_name,
             sender_username=sender_username,
             message_text=text,
@@ -337,6 +421,7 @@ class UserClient:
             market_price=cold_result.market_price,
             market_deadline=cold_result.market_deadline,
             lead_score=cold_result.lead_score,
+            **lead_meta,
         )
         logger.info(f"ХОЛОДНЫЙ ЛИД #{lead_id} [{cold_result.category}] от {sender_name}")
 
@@ -354,7 +439,8 @@ class UserClient:
                 market_price=cold_result.market_price,
                 market_deadline=cold_result.market_deadline,
                 lead_score=cold_result.lead_score,
-                sender_id=sender.id,
+                sender_id=meta["sender_id"],
+                **lead_meta,
             )
 
     async def _process_private_message(self, event):
@@ -389,6 +475,11 @@ class UserClient:
                     sender_id=dialog["sender_id"], dialog_id=dialog["id"],
                     reason="Клиент написал после передачи диалога",
                 )
+            return
+
+        # Исходящие заблокированы — сообщение залогировано, автоответ не генерируем
+        if self._paused:
+            logger.info(f"ЛС от {sender_id} залогировано, автоответ пропущен (исходящие заблокированы)")
             return
 
         # Накапливаем сообщения и перезапускаем таймер
@@ -651,7 +742,8 @@ class UserClient:
                                stage: str) -> bool:
         success = await self._send_message(dialog["sender_id"], text)
         if not success:
-            await self._notify_human_required(dialog, text, "Сообщение клиенту не отправлено")
+            if not self._paused:
+                await self._notify_human_required(dialog, text, "Сообщение клиенту не отправлено")
             return False
         messages.append({"role": "assistant", "content": text})
         await db.update_dialog_messages(dialog["id"], json.dumps(messages, ensure_ascii=False))
@@ -689,6 +781,9 @@ class UserClient:
         
         fast=True — пропуск долгой паузы перед действием (для пользовательских команд).
         """
+        if self._paused:
+            logger.warning("Отправка заблокирована: исходящие выключены владельцем")
+            return False
         if not await self.anti_ban.can_send():
             logger.warning("Отправка заблокирована анти-бан модулем")
             return False
@@ -712,9 +807,18 @@ class UserClient:
         import ai_engine
         import random
 
+        if self._paused:
+            logger.warning("Диалог не начат: исходящие сообщения заблокированы")
+            return False
+
         lead = await db.get_lead(lead_id)
         if not lead:
             logger.error(f"Лид #{lead_id} не найден")
+            return False
+
+        # Личный диалог возможен только с реальным пользователем, а не с каналом/анонимом
+        if not lead.get("sender_id") or (lead.get("sender_type") and lead["sender_type"] != "user"):
+            logger.warning(f"Лид #{lead_id}: нет прямого контакта (sender_type={lead.get('sender_type')}) — диалог не начат")
             return False
 
         # Проверяем, не писали ли уже этому пользователю
@@ -802,9 +906,17 @@ class UserClient:
         import ai_engine
         import random
 
+        if self._paused:
+            logger.warning("Холодный диалог не начат: исходящие сообщения заблокированы")
+            return False
+
         lead = await db.get_cold_lead(lead_id)
         if not lead:
             logger.error(f"Холодный лид #{lead_id} не найден")
+            return False
+
+        if not lead.get("sender_id") or (lead.get("sender_type") and lead["sender_type"] != "user"):
+            logger.warning(f"Холодный лид #{lead_id}: нет прямого контакта (sender_type={lead.get('sender_type')}) — диалог не начат")
             return False
 
         if await db.has_seen_user(lead["sender_id"]):
@@ -966,6 +1078,9 @@ class UserClient:
 
     async def send_scheduled_message(self, chat_id: int, text: str):
         """Отправка запланированного сообщения в чат (для scheduler)."""
+        if self._paused:
+            logger.warning("Запланированная отправка отменена: исходящие заблокированы")
+            return False
         if not await self.anti_ban.can_send():
             logger.warning("Запланированная отправка заблокирована анти-бан модулем")
             return False

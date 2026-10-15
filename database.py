@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS chats (
 CREATE TABLE IF NOT EXISTS messages_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER NOT NULL,
-    sender_id INTEGER NOT NULL,
+    sender_id INTEGER,
     sender_name TEXT,
     message_text TEXT,
     message_id INTEGER NOT NULL,
@@ -44,6 +44,13 @@ CREATE TABLE IF NOT EXISTS leads (
     market_price TEXT,
     market_deadline TEXT,
     lead_score INTEGER DEFAULT 0,
+    source_message_id INTEGER,
+    source_url TEXT,
+    sender_type TEXT,
+    contact_username TEXT,
+    contact_source TEXT,
+    service TEXT,
+    evidence TEXT,
     status TEXT DEFAULT 'NEW',
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (chat_id) REFERENCES chats(chat_id)
@@ -52,7 +59,7 @@ CREATE TABLE IF NOT EXISTS leads (
 CREATE TABLE IF NOT EXISTS dialogs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     lead_id INTEGER NOT NULL,
-    sender_id INTEGER NOT NULL,
+    sender_id INTEGER,
     sender_name TEXT,
     sender_username TEXT,
     lead_source TEXT DEFAULT 'regular',
@@ -120,6 +127,13 @@ CREATE TABLE IF NOT EXISTS cold_leads (
     market_price TEXT,
     market_deadline TEXT,
     lead_score INTEGER DEFAULT 0,
+    source_message_id INTEGER,
+    source_url TEXT,
+    sender_type TEXT,
+    contact_username TEXT,
+    contact_source TEXT,
+    service TEXT,
+    evidence TEXT,
     status TEXT DEFAULT 'NEW',
     created_at TEXT DEFAULT (datetime('now'))
 );
@@ -213,8 +227,12 @@ async def _migrate_leads(db):
         await db.execute("ALTER TABLE leads ADD COLUMN market_price TEXT")
     if "market_deadline" not in columns:
         await db.execute("ALTER TABLE leads ADD COLUMN market_deadline TEXT")
-    if "lead_score" not in columns:
-        await db.execute("ALTER TABLE leads ADD COLUMN lead_score INTEGER DEFAULT 0")
+    additions = {"lead_score": "INTEGER DEFAULT 0", "source_message_id": "INTEGER",
+                 "source_url": "TEXT", "sender_type": "TEXT", "contact_username": "TEXT",
+                 "contact_source": "TEXT", "service": "TEXT", "evidence": "TEXT"}
+    for name, definition in additions.items():
+        if name not in columns:
+            await db.execute(f"ALTER TABLE leads ADD COLUMN {name} {definition}")
 
 
 async def _migrate_cold_leads(db):
@@ -225,8 +243,12 @@ async def _migrate_cold_leads(db):
         await db.execute("ALTER TABLE cold_leads ADD COLUMN market_price TEXT")
     if "market_deadline" not in columns:
         await db.execute("ALTER TABLE cold_leads ADD COLUMN market_deadline TEXT")
-    if "lead_score" not in columns:
-        await db.execute("ALTER TABLE cold_leads ADD COLUMN lead_score INTEGER DEFAULT 0")
+    additions = {"lead_score": "INTEGER DEFAULT 0", "source_message_id": "INTEGER",
+                 "source_url": "TEXT", "sender_type": "TEXT", "contact_username": "TEXT",
+                 "contact_source": "TEXT", "service": "TEXT", "evidence": "TEXT"}
+    for name, definition in additions.items():
+        if name not in columns:
+            await db.execute(f"ALTER TABLE cold_leads ADD COLUMN {name} {definition}")
 
 
 async def _migrate_dialogs(db):
@@ -462,20 +484,19 @@ async def get_last_read_message(chat_id: int) -> int:
             return row[0] if row else 0
 
 
-async def add_cold_lead(chat_id: int, chat_name: str, sender_id: int,
+async def add_cold_lead(chat_id: int, chat_name: str, sender_id: int | None,
                         sender_name: str, sender_username: str, message_text: str,
                         category: str, business_type: str = None, pain: str = None,
                         hook: str = None, market_price: str = None,
-                        market_deadline: str = None, lead_score: int = 0) -> int:
+                        market_deadline: str = None, lead_score: int = 0, **metadata) -> int:
+    columns = ["chat_id", "chat_name", "sender_id", "sender_name", "sender_username", "message_text", "category", "business_type", "pain", "hook", "market_price", "market_deadline", "lead_score"]
+    values = [chat_id, chat_name, sender_id, sender_name, sender_username, message_text, category, business_type, pain, hook, market_price, market_deadline, lead_score]
+    for name in ("source_message_id", "source_url", "sender_type", "contact_username", "contact_source", "service", "evidence"):
+        if name in metadata:
+            columns.append(name); values.append(metadata[name])
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            """INSERT INTO cold_leads (chat_id, chat_name, sender_id, sender_name,
-               sender_username, message_text, category, business_type, pain, hook,
-               market_price, market_deadline, lead_score)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (chat_id, chat_name, sender_id, sender_name, sender_username,
-             message_text, category, business_type, pain, hook,
-             market_price, market_deadline, lead_score)
+            f"INSERT INTO cold_leads ({', '.join(columns)}) VALUES ({', '.join('?' for _ in values)})", values
         )
         await db.commit()
         return cursor.lastrowid
@@ -607,18 +628,19 @@ async def has_recent_lead_from_sender(sender_id: int, hours: int = 24) -> bool:
         ) as cursor:
             return await cursor.fetchone() is not None
 
-async def add_lead(chat_id: int, chat_name: str, sender_id: int,
+async def add_lead(chat_id: int, chat_name: str, sender_id: int | None,
                    sender_name: str, sender_username: str, message_text: str,
                    category: str, task: str = None, budget: str = None,
                    deadline: str = None, market_price: str = None,
-                   market_deadline: str = None, lead_score: int = 0) -> int:
+                   market_deadline: str = None, lead_score: int = 0, **metadata) -> int:
+    columns = ["chat_id", "chat_name", "sender_id", "sender_name", "sender_username", "message_text", "category", "task", "budget", "deadline", "market_price", "market_deadline", "lead_score"]
+    values = [chat_id, chat_name, sender_id, sender_name, sender_username, message_text, category, task, budget, deadline, market_price, market_deadline, lead_score]
+    for name in ("source_message_id", "source_url", "sender_type", "contact_username", "contact_source", "service", "evidence"):
+        if name in metadata:
+            columns.append(name); values.append(metadata[name])
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            """INSERT INTO leads (chat_id, chat_name, sender_id, sender_name, sender_username,
-               message_text, category, task, budget, deadline, market_price, market_deadline, lead_score)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (chat_id, chat_name, sender_id, sender_name, sender_username,
-             message_text, category, task, budget, deadline, market_price, market_deadline, lead_score)
+            f"INSERT INTO leads ({', '.join(columns)}) VALUES ({', '.join('?' for _ in values)})", values
         )
         await db.commit()
         return cursor.lastrowid

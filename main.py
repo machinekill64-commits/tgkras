@@ -40,7 +40,7 @@ async def main():
     # OmniRoute работает без ключа (ключ по умолчанию "omni"), так что проверяем только если провайдер не omniroute
     has_ai_key = (config.OMNIROUTE_API_KEY or config.GROQ_API_KEY or
                   config.OPENROUTER_API_KEY or config.OPENAI_API_KEY or
-                  config.DEEPSEEK_API_KEY)
+                  config.DEEPSEEK_API_KEY or config.GIGACHAT_API_KEY)
     if not has_ai_key:
         errors.append("Нужен хотя бы один AI провайдер. Бесплатно: OmniRoute (npm install -g omniroute) или Groq (console.groq.com)")
 
@@ -61,33 +61,10 @@ async def main():
     async def notification_router(**kwargs):
         """Маршрутизатор уведомлений: обычные лиды -> notify_lead,
         холодные лиды -> notify_cold_lead. Переводит иностранные лиды на русский."""
-        category = kwargs.get("category", "")
+        from lead_presentation import prepare_lead_notification
+        kwargs = await prepare_lead_notification(kwargs)
 
-        # Перевод сообщения лида, если оно на иностранном языке
-        message_text = kwargs.get("message_text", "")
-        if message_text and len(message_text) > 10:
-            try:
-                from translator import detect_language, translate, get_language_label, get_language_flag
-                detected_lang = detect_language(message_text)
-                if detected_lang != "ru":
-                    # Переводим на русский
-                    translated = await translate(message_text, detected_lang, "ru")
-                    if translated and translated != message_text:
-                        flag = get_language_flag(detected_lang)
-                        lang_label = get_language_label(detected_lang)
-                        # Сохраняем оригинал и добавляем перевод
-                        kwargs["original_message_text"] = message_text
-                        kwargs["message_text"] = (
-                            f"{flag} {lang_label}\n\n"
-                            f"📝 Оригинал:\n{message_text[:800]}\n\n"
-                            f"🔄 Перевод на русский:\n{translated[:800]}"
-                        )
-                        kwargs["detected_language"] = detected_lang
-                        logger.info(f"Лид переведён {detected_lang}->ru: {len(message_text)} символов")
-            except Exception as e:
-                logger.error(f"Ошибка перевода лида: {e}")
-
-        if category in ("HOT_COLD", "WARM_COLD"):
+        if kwargs.get("category", "") in ("HOT_COLD", "WARM_COLD"):
             await notif_bot.notify_cold_lead(**kwargs)
         else:
             await notif_bot.notify_lead(**kwargs)
@@ -214,6 +191,30 @@ async def main():
         logger.info("Парсинг запущен через API (GUI)")
         return web.json_response({"success": True, "paused": False})
 
+    async def api_restart(request):
+        """API: перезапустить сервис (ручной рестарт из GUI).
+
+        systemd-run планирует `systemctl restart` через 3 секунды в отдельном
+        transient-юните — это переживает смерть текущего процесса и даёт
+        aiohttp время вернуть ответ. Если systemd-run недоступен — убиваем
+        себя по SIGTERM, systemd с Restart=always поднимет сервис заново.
+        Актуально при отвале Telethon-клиента (прокси/сеть) без авто-реконнекта.
+        """
+        import subprocess
+        import signal
+        logger.info("RESTART запрошен через API (GUI) — перезапуск через 3с")
+        try:
+            subprocess.Popen(
+                ['systemd-run', '--on-active=3s', 'systemctl', 'restart', 'lead-hunter'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return web.json_response({"success": True, "message": "restart in 3s"})
+        except FileNotFoundError:
+            # systemd-run недоступен — убиваем процесс, systemd Restart=always поднимет
+            loop = asyncio.get_event_loop()
+            loop.call_later(1.0, lambda: os.kill(os.getpid(), signal.SIGTERM))
+            return web.json_response({"success": True, "message": "restart via SIGTERM in 1s"})
+
     app.router.add_get('/api/chats', get_chats)
     app.router.add_post('/api/chats', api_update_chat)
     app.router.add_post('/api/sync_dialogs', api_sync_dialogs)
@@ -223,6 +224,7 @@ async def main():
     app.router.add_get('/api/status', api_status)
     app.router.add_post('/api/pause', api_pause)
     app.router.add_post('/api/resume', api_resume)
+    app.router.add_post('/api/restart', api_restart)
     
     runner = web.AppRunner(app)
     await runner.setup()

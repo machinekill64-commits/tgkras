@@ -1,6 +1,7 @@
 """Бот уведомлений (aiogram): присылает лиды на основной аккаунт владельца."""
 import logging
 import asyncio
+import re
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -13,8 +14,61 @@ from config import (NOTIF_BOT_TOKEN, OWNER_TG_ID, COLD_OUTREACH_DAILY_LIMIT, TG_
 import database as db
 import gis_importer
 import cold_outreach
+from lead_presentation import clip_text
+from translator import get_language_label
 
 logger = logging.getLogger(__name__)
+
+
+def _lead_contact(sender_username: str | None, sender_id: int | None,
+                  contact_username: str | None = None,
+                  contact_source: str | None = None):
+    username = (sender_username or "").strip().lstrip("@")
+    if username and re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+        return f"📨 Username для связи: @{username}", InlineKeyboardButton(
+            text=f"Открыть @{username}", url=f"https://t.me/{username}"
+        )
+    text_contact = (contact_username or "").strip().lstrip("@")
+    if text_contact and re.fullmatch(r"[A-Za-z0-9_]{5,32}", text_contact):
+        return (f"📨 Контакт из текста: @{text_contact}", InlineKeyboardButton(
+            text=f"Открыть @{text_contact}", url=f"https://t.me/{text_contact}"
+        ))
+    if sender_id:
+        return f"📨 Username не указан · Telegram ID: {sender_id}", InlineKeyboardButton(
+            text="Открыть профиль автора", url=f"tg://user?id={int(sender_id)}"
+        )
+    return "📨 Прямой контакт не указан (анонимный/канальный пост)", None
+
+
+def _keep_url_buttons(markup) -> InlineKeyboardMarkup | None:
+    """Сохраняет только URL-кнопки (контакт/источник) после edit_text колбэков."""
+    if not markup:
+        return None
+    rows = [[b for b in row if getattr(b, "url", None)]
+            for row in markup.inline_keyboard]
+    rows = [r for r in rows if r]
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+def _lead_message_block(message_text: str, original_message_text: str = None,
+                        detected_language: str = None,
+                        translation_failed: bool = False) -> str:
+    """Блок текста лида: перевод + оригинал, оригинал при сбое, либо сообщение."""
+    if translation_failed:
+        return ("Перевод временно недоступен.\nОригинал:\n"
+                + clip_text(original_message_text or message_text, 1400))
+    if original_message_text and original_message_text != message_text:
+        lang_label = get_language_label(detected_language) if detected_language else "original"
+        return (f"Перевод на русский:\n{clip_text(message_text, 1400)}\n\n"
+                f"Оригинал ({lang_label}):\n{clip_text(original_message_text, 400)}")
+    return f"Сообщение:\n{clip_text(message_text, 1400)}"
+
+
+def _can_write_client(sender_type: str | None, sender_id: int | None) -> bool:
+    """Кнопку 'Написать клиенту' показываем только когда есть реальный пользователь."""
+    if sender_type:
+        return sender_type == "user" and bool(sender_id)
+    return bool(sender_id)
 
 
 class NotificationBot:
@@ -25,7 +79,7 @@ class NotificationBot:
         if TG_BOT_PROXY:
             session = AiohttpSession(proxy=TG_BOT_PROXY)
             self.bot = Bot(token=NOTIF_BOT_TOKEN, session=session)
-            logger.info(f"Bot API через прокси: {TG_BOT_PROXY}")
+            logger.info("Bot API: proxy configured")
         else:
             self.bot = Bot(token=NOTIF_BOT_TOKEN)
             logger.info("Bot API: прямое подключение (без прокси)")
@@ -186,10 +240,10 @@ class NotificationBot:
                 return
             if self.user_client:
                 if self.user_client.is_paused:
-                    await message.answer("⏸ Парсинг уже остановлен.")
+                    await message.answer("⏸ Исходящие уже заблокированы.")
                 else:
                     await self.user_client.pause()
-                    await message.answer("⏸ Парсинг остановлен.\nОбработка новых сообщений и рассылки приостановлены.\nНажмите «▶️ Запустить парсинг» чтобы возобновить.")
+                    await message.answer("⏸ Исходящие сообщения заблокированы.\nМониторинг чатов и уведомления о лидах продолжают работать.\nНажмите «▶️ Запустить парсинг» чтобы возобновить отправки.")
             else:
                 await message.answer("❌ Клиент не инициализирован")
 
@@ -199,10 +253,10 @@ class NotificationBot:
                 return
             if self.user_client:
                 if not self.user_client.is_paused:
-                    await message.answer("▶️ Парсинг уже идёт.")
+                    await message.answer("▶️ Исходящие уже включены.")
                 else:
                     await self.user_client.resume()
-                    await message.answer("▶️ Парсинг запущен!\nОбработка сообщений и рассылки возобновлены.")
+                    await message.answer("▶️ Исходящие сообщения разблокированы!\nДиалоги и рассылки возобновлены.")
             else:
                 await message.answer("❌ Клиент не инициализирован")
 
@@ -585,7 +639,8 @@ class NotificationBot:
             await db.close_dialog(dialog_id)
             await callback.answer("Диалог закрыт")
             await callback.message.edit_text(
-                callback.message.text + "\n\n✅ Закрыто"
+                callback.message.text + "\n\n✅ Закрыто",
+                reply_markup=_keep_url_buttons(callback.message.reply_markup),
             )
 
         @self.dp.callback_query(F.data.startswith("approve_chat_"))
@@ -603,7 +658,8 @@ class NotificationBot:
                 joined_today = await db.get_chat_joins_today()
                 if joined_today >= CHAT_JOIN_DAILY_LIMIT:
                     await callback.message.edit_text(
-                        callback.message.text + f"\n\n❌ Дневной лимит вступлений исчерпан ({joined_today}/{CHAT_JOIN_DAILY_LIMIT})"
+                        callback.message.text + f"\n\n❌ Дневной лимит вступлений исчерпан ({joined_today}/{CHAT_JOIN_DAILY_LIMIT})",
+                        reply_markup=_keep_url_buttons(callback.message.reply_markup),
                     )
                     return
                 chat = {"username": username, "title": f"@{username}", "participants_count": 0}
@@ -612,11 +668,13 @@ class NotificationBot:
                 )
                 if success:
                     await callback.message.edit_text(
-                        callback.message.text + f"\n\n✅ Вступил, мьют, архив, папка: {folder}"
+                        callback.message.text + f"\n\n✅ Вступил, мьют, архив, папка: {folder}",
+                        reply_markup=_keep_url_buttons(callback.message.reply_markup),
                     )
                 else:
                     await callback.message.edit_text(
-                        callback.message.text + "\n\n❌ Ошибка вступления"
+                        callback.message.text + "\n\n❌ Ошибка вступления",
+                        reply_markup=_keep_url_buttons(callback.message.reply_markup),
                     )
             else:
                 await callback.message.answer("❌ Клиент не инициализирован")
@@ -627,7 +685,8 @@ class NotificationBot:
                 return
             await callback.answer("Отклонено")
             await callback.message.edit_text(
-                callback.message.text + "\n\n❌ Отклонено"
+                callback.message.text + "\n\n❌ Отклонено",
+                reply_markup=_keep_url_buttons(callback.message.reply_markup),
             )
 
         @self.dp.message(Command("price"))
@@ -665,11 +724,13 @@ class NotificationBot:
                 success = await self.user_client.start_dialog_with_lead(lead_id)
                 if success:
                     await callback.message.edit_text(
-                        callback.message.text + "\n\n✅ AI начал диалог с клиентом"
+                        callback.message.text + "\n\n✅ AI начал диалог с клиентом",
+                        reply_markup=_keep_url_buttons(callback.message.reply_markup),
                     )
                 else:
                     await callback.message.edit_text(
-                        callback.message.text + "\n\n❌ Не удалось начать диалог (лимиты или ошибка)"
+                        callback.message.text + "\n\n❌ Не удалось начать диалог (лимиты или ошибка)",
+                        reply_markup=_keep_url_buttons(callback.message.reply_markup),
                     )
             else:
                 await callback.message.answer("❌ Клиент не инициализирован")
@@ -682,7 +743,8 @@ class NotificationBot:
             await db.update_lead_status(lead_id, "IGNORED")
             await callback.answer("Лид проигнорирован")
             await callback.message.edit_text(
-                callback.message.text + "\n\n❌ Проигнорировано"
+                callback.message.text + "\n\n❌ Проигнорировано",
+                reply_markup=_keep_url_buttons(callback.message.reply_markup),
             )
 
         @self.dp.callback_query(F.data.startswith("task_"))
@@ -719,11 +781,13 @@ class NotificationBot:
                 success = await self.user_client.start_dialog_with_cold_lead(lead_id)
                 if success:
                     await callback.message.edit_text(
-                        callback.message.text + "\n\n✅ AI начал диалог с холодным лидом"
+                        callback.message.text + "\n\n✅ AI начал диалог с холодным лидом",
+                        reply_markup=_keep_url_buttons(callback.message.reply_markup),
                     )
                 else:
                     await callback.message.edit_text(
-                        callback.message.text + "\n\n❌ Не удалось начать диалог (лимиты, уже писали или ошибка)"
+                        callback.message.text + "\n\n❌ Не удалось начать диалог (лимиты, уже писали или ошибка)",
+                        reply_markup=_keep_url_buttons(callback.message.reply_markup),
                     )
             else:
                 await callback.message.answer("❌ Клиент не инициализирован")
@@ -736,7 +800,8 @@ class NotificationBot:
             await db.update_cold_lead_status(lead_id, "IGNORED")
             await callback.answer("Холодный лид проигнорирован")
             await callback.message.edit_text(
-                callback.message.text + "\n\n❌ Проигнорировано"
+                callback.message.text + "\n\n❌ Проигнорировано",
+                reply_markup=_keep_url_buttons(callback.message.reply_markup),
             )
 
         @self.dp.callback_query(F.data.startswith("takeover_"))
@@ -747,7 +812,8 @@ class NotificationBot:
             await db.update_dialog_stage(dialog_id, "ENDED")
             await callback.answer("Диалог передан вам")
             await callback.message.edit_text(
-                callback.message.text + "\n\n👤 Диалог передан вам. Общайтесь напрямую."
+                callback.message.text + "\n\n👤 Диалог передан вам. Общайтесь напрямую.",
+                reply_markup=_keep_url_buttons(callback.message.reply_markup),
             )
 
         @self.dp.message(Command("cold_stats"))
@@ -1038,7 +1104,7 @@ class NotificationBot:
         status_text = (
             f"📊 Статус системы\n\n"
             f"• Клиент: {'✅ Запущен' if running else '❌ Остановлен'}\n"
-            f"• Режим: {'⏸ Парсинг остановлен' if (self.user_client and self.user_client.is_paused) else '▶️ Парсинг идёт'}\n"
+            f"• Режим: {'⏸ Исходящие заблокированы (мониторинг идёт)' if (self.user_client and self.user_client.is_paused) else '▶️ Полный режим'}\n"
             f"• Прогрев: {'⏳ Активен' if warmup else '✅ Завершён'}\n"
             f"• Чатов отслеживается: {len(chats)}\n"
             f"• Действий за час: {hourly}\n"
@@ -1488,28 +1554,52 @@ class NotificationBot:
                                category: str, business_type: str = None,
                                pain: str = None, hook: str = None,
                                market_price: str = None, market_deadline: str = None,
-                               lead_score: int = 0, sender_id: int = None):
+                               lead_score: int = 0, sender_id: int = None,
+                               source_message_id: int = None, source_url: str = None,
+                               sender_type: str = None, contact_username: str = None,
+                               contact_source: str = None, service: str = None,
+                               evidence: str = None,
+                               original_message_text: str = None,
+                               detected_language: str = None,
+                               translation_failed: bool = False):
         """Отправка уведомления о холодном лиде владельцу."""
         category_emoji = {"HOT_COLD": "❄️🔥", "WARM_COLD": "🧊"}.get(category, "❓")
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Написать клиенту", callback_data=f"cold_write_{lead_id}"),
-                InlineKeyboardButton(text="❌ Игнорировать", callback_data=f"cold_ignore_{lead_id}"),
-            ],
-        ])
+        contact_text, contact_button = _lead_contact(
+            sender_username, sender_id, contact_username, contact_source)
+        action_row = []
+        if _can_write_client(sender_type, sender_id):
+            action_row.append(InlineKeyboardButton(
+                text="✅ Написать клиенту", callback_data=f"cold_write_{lead_id}"))
+        action_row.append(InlineKeyboardButton(
+            text="❌ Игнорировать", callback_data=f"cold_ignore_{lead_id}"))
+        keyboard_rows = [action_row]
+        if contact_button:
+            keyboard_rows.append([contact_button])
+        if source_url:
+            keyboard_rows.append([InlineKeyboardButton(
+                text="🔗 Исходное сообщение", url=source_url)])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
         text = (
-            f"{category_emoji} Холодный лид #{lead_id}\n\n"
+            f"{category_emoji} Возможная потребность #{lead_id}\n\n"
             f"📍 Чат: {chat_name}\n"
             f"👤 Автор: {sender_name}"
             + (f" (@{sender_username})" if sender_username else "") + "\n"
+            f"{contact_text}\n"
             f"📂 Категория: {category}\n"
-            f"⭐ Скор: {lead_score}/100\n"
         )
+        if service:
+            text += f"🛠 Услуга: {service}\n"
         if business_type:
             text += f"🏢 Тип бизнеса: {business_type}\n"
         if pain:
             text += f"💡 Потребность: {pain}\n"
-        text += f"\n💬 Сообщение:\n{message_text[:500]}\n"
+        if category == "WARM_COLD":
+            text += "Заказ на разработку пока не заявлен.\n"
+        if evidence:
+            text += f"📎 Основание: «{clip_text(evidence, 350)}»\n"
+        text += "\n" + _lead_message_block(
+            message_text, original_message_text, detected_language,
+            translation_failed) + "\n"
         if hook:
             text += f"\n🎯 Подход: {hook}\n"
         if market_price or market_deadline:
@@ -1518,7 +1608,8 @@ class NotificationBot:
                 text += f"   💵 Рекомендуемая цена: {market_price}\n"
             if market_deadline:
                 text += f"   ⏱ Рекомендуемый срок: {market_deadline}\n"
-        await self.bot.send_message(OWNER_TG_ID, text, reply_markup=keyboard)
+        await self.bot.send_message(OWNER_TG_ID, clip_text(text, 3500),
+                                    reply_markup=keyboard)
 
     async def notify_lead(self, lead_id: int, chat_name: str, sender_name: str,
                           sender_username: str | None, message_text: str,
@@ -1527,7 +1618,14 @@ class NotificationBot:
                           market_deadline: str = None, lead_score: int = 0,
                           sender_id: int = None, dialog_id: int = None,
                           recommendation: str = None, service_description: str = None,
-                          country: str = None, brief: str = None, reason: str = None):
+                          country: str = None, brief: str = None, reason: str = None,
+                          source_message_id: int = None, source_url: str = None,
+                          sender_type: str = None, contact_username: str = None,
+                          contact_source: str = None, service: str = None,
+                          evidence: str = None,
+                          original_message_text: str = None,
+                          detected_language: str = None,
+                          translation_failed: bool = False):
         """Отправка уведомления о лиде владельцу."""
 
         if category == "PRICE_REQUIRED":
@@ -1611,28 +1709,45 @@ class NotificationBot:
 
         # Обычный лид из чата
         category_emoji = {"HOT": "🔥", "WARM": "🌡️"}.get(category, "❓")
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Написать клиенту", callback_data=f"write_{lead_id}"),
-                InlineKeyboardButton(text="❌ Игнорировать", callback_data=f"ignore_{lead_id}"),
-            ],
-        ])
+        contact_text, contact_button = _lead_contact(
+            sender_username, sender_id, contact_username, contact_source)
+        action_row = []
+        if _can_write_client(sender_type, sender_id):
+            action_row.append(InlineKeyboardButton(
+                text="✅ Написать клиенту", callback_data=f"write_{lead_id}"))
+        action_row.append(InlineKeyboardButton(
+            text="❌ Игнорировать", callback_data=f"ignore_{lead_id}"))
+        keyboard_rows = [action_row]
+        if contact_button:
+            keyboard_rows.append([contact_button])
+        if source_url:
+            keyboard_rows.append([InlineKeyboardButton(
+                text="🔗 Исходное сообщение", url=source_url)])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
         text = (
             f"{category_emoji} Найден лид #{lead_id}\n\n"
             f"📍 Чат: {chat_name}\n"
             f"👤 Автор: {sender_name}"
             + (f" (@{sender_username})" if sender_username else "") + "\n"
+            f"{contact_text}\n"
             f"📂 Категория: {category}\n"
-            f"⭐ Скор: {lead_score}/100\n\n"
-            f"💬 Сообщение:\n{message_text[:500]}\n"
         )
+        if service:
+            text += f"🛠 Услуга: {service}\n"
+        elif lead_score:
+            text += f"⭐ Скор: {lead_score}/100\n"
         if task:
-            text += f"\n🎯 Задача: {task}\n"
+            text += f"🎯 Задача: {task}\n"
         if budget:
             text += f"💰 Бюджет клиента: {budget}\n"
         if deadline:
             text += f"⏰ Сроки клиента: {deadline}\n"
+        if evidence:
+            text += f"📎 Основание: «{clip_text(evidence, 350)}»\n"
+        text += "\n" + _lead_message_block(
+            message_text, original_message_text, detected_language,
+            translation_failed) + "\n"
         if market_price or market_deadline:
             text += "\n📊 Рыночная оценка (совет AI, клиент её не называл):\n"
             if market_price:
@@ -1640,7 +1755,8 @@ class NotificationBot:
             if market_deadline:
                 text += f"   ⏱ Рекомендуемый срок: {market_deadline}\n"
 
-        await self.bot.send_message(OWNER_TG_ID, text, reply_markup=keyboard)
+        await self.bot.send_message(OWNER_TG_ID, clip_text(text, 3500),
+                                    reply_markup=keyboard)
 
     async def start(self):
         """Запуск бота (polling)."""

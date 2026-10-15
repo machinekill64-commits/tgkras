@@ -16,6 +16,7 @@ GigaChat — fallback для языков, которые MyMemory не подд
 """
 import json
 import logging
+import re
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -112,41 +113,72 @@ LANG_DETECT_KEYWORDS = {
 }
 
 
+# Специфические буквы казахского и украинского/белорусского —
+# их наличие надёжно отличает эти языки от русского без ложных срабатываний
+_KAZAKH_LETTERS = set("әғқңөұүһі")
+_UK_BY_LETTERS = set("іїєґў")
+
+# Ключевые слова для латинских языков — матчим целыми словами, не подстроками,
+# иначе английский текст со словами «site»/«bot» ошибочно уходит в pt/id.
+_LANG_WORD_PATTERNS = {
+    "en": re.compile(r"(?i)\b(the|need|want|looking|for|with|and|you|your|"
+                     r"please|contact|services?|development|website|app|"
+                     r"price|budget|hire|my|we|our|is|are|to|dm|me)\b"),
+    "pt": re.compile(r"(?i)\b(preciso|quero|aplicativo|orçamento|preço|"
+                     r"desenvolvimento|olá|obrigado|aplicação|plataforma|"
+                     r"comprar|vender|você|não)\b"),
+    "id": re.compile(r"(?i)\b(saya|butuh|aplikasi|ingin|membuat|harga|"
+                     r"biaya|terima|halo|jasa|pengembangan|yang)\b"),
+    "es": re.compile(r"(?i)\b(necesito|quiero|sitio|aplicación|presupuesto|"
+                     r"precio|desarrollo|hola|gracias|programación|"
+                     r"comprar|vender|una)\b"),
+    "tr": re.compile(r"(?i)\b(ihtiyac|istiyorum|uygulama|fiyat|bütçe|"
+                     r"geliştirme|merhaba|teşekkür|yazılım|almak|satmak)\b"),
+    "uz": re.compile(r"(?i)\b(kerak|sayt|ilova|tizim|narxi|yaratish|"
+                     r"salom|rahmat|ishlab)\b"),
+    "az": re.compile(r"(?i)\b(lazım|tətbiq|qiymət|yaratmaq|salam|"
+                     r"təşəkkür|inkişaf)\b"),
+}
+
+
 def detect_language(text: str) -> str:
-    """Определяет язык текста по ключевым словам.
-    Возвращает код языка или 'en' по умолчанию.
-    """
+    """Определяет язык текста. Возвращает код языка ('ru', 'en', ...)."""
     if not text:
         return "en"
-    text_lower = text.lower()
 
-    # Проверяем арабский алфавит
+    # Арабский алфавит
     if any("\u0600" <= c <= "\u06FF" for c in text):
         return "ar"
+    # Китайский / японский / корейский
+    if any("\u4E00" <= c <= "\u9FFF" for c in text):
+        return "zh"
+    if any("\u3040" <= c <= "\u30FF" for c in text):
+        return "ja"
+    if any("\uAC00" <= c <= "\uD7A3" for c in text):
+        return "ko"
 
-    # Проверяем кириллицу
+    # Кириллица: специфические буквы казахского/украинского — иначе русский
     if any("\u0400" <= c <= "\u04FF" for c in text):
-        # Может быть русский, казахский, узбекский, азербайджанский
-        # Проверяем по ключевым словам
-        for lang, keywords in LANG_DETECT_KEYWORDS.items():
-            if lang in ("kz", "uz", "az"):
-                count = sum(1 for kw in keywords if kw in text_lower)
-                if count >= 2:
-                    return lang
+        text_lower = text.lower()
+        if any(c in _KAZAKH_LETTERS for c in text_lower):
+            return "kz"
+        if any(c in _UK_BY_LETTERS for c in text_lower):
+            return "uk"
         return "ru"
 
-    # Проверяем по ключевым словам для латинских языков
+    # Латиница: подсчёт слов-маркеров по словарям (word-boundary)
     scores = {}
-    for lang, keywords in LANG_DETECT_KEYWORDS.items():
-        if lang in ("ar", "kz", "uz", "az"):
-            continue
-        count = sum(1 for kw in keywords if kw in text_lower)
-        if count > 0:
+    for lang, pattern in _LANG_WORD_PATTERNS.items():
+        count = len(pattern.findall(text))
+        if count:
             scores[lang] = count
-
     if scores:
-        return max(scores, key=scores.get)
-
+        best, best_score = max(scores.items(), key=lambda kv: kv[1])
+        # Неанглийскому языку нужно минимум 2 слова-маркера,
+        # иначе короткие английские тексты ловят ложный язык
+        if best == "en" or best_score >= 2:
+            return best
+        return "en"
     return "en"
 
 

@@ -380,6 +380,10 @@ class ServerAPI:
     def resume_parsing(self) -> dict:
         return self._request("POST", "/api/resume", {})
 
+    def restart_server(self) -> dict:
+        """Перезапустить сервис на сервере (ручной рестарт при отвале Telethon)."""
+        return self._request("POST", "/api/restart", {}, timeout=15, retries=0)
+
 
 # ═══════════════════════════════════════════════════════════════
 # ГЛАВНОЕ ПРИЛОЖЕНИЕ
@@ -670,6 +674,9 @@ class App:
         self.resume_btn = BButton(parse_btns, "ЗАПУСК", command=self.resume_parsing,
                                   style="primary")
         self.resume_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+        self.restart_btn = BButton(parse_btns, "ПЕРЕЗАПУСК", command=self.restart_server,
+                                   style="ghost")
+        self.restart_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
 
         # ── СТАТУС-БАР ──
         self.status_var = tk.StringVar(value=f"Подключение к {SERVER_URL}...")
@@ -685,7 +692,7 @@ class App:
     def _set_controls_enabled(self, enabled: bool):
         state = "normal" if enabled else "disabled"
         for btn in (self.save_btn, self.test_btn, self.sync_btn, self.reload_btn,
-                    self.pause_btn, self.resume_btn):
+                    self.pause_btn, self.resume_btn, self.restart_btn):
             btn.configure(state=state)
 
     def _toggle_no_rules(self):
@@ -976,6 +983,32 @@ class App:
             MessageDialog(self.root, "Ошибка", str(e), style="error")
 
         self.run_bg(self.api.resume_parsing, on_done=done, on_error=err)
+
+    def restart_server(self):
+        """Ручной рестарт сервиса на сервере. Актуально когда Telethon отвалился
+        (прокси/сеть) и не переподключился — 500 на синхронизации/отправке.
+        Сервис перезапускается через systemd, Telethon поднимается заново."""
+        if not messagebox.askyesno("Перезапуск сервера",
+                "Перезапустить сервис lead-hunter на сервере?\n\n"
+                "Это переподключит рабочий аккаунт к Telegram.\n"
+                "GUI потеряет связь на ~15 секунд, затем переподключится автоматически."):
+            return
+        self.status_var.set("ПЕРЕЗАПУСК — сервер перезапускается...")
+        self.restart_btn.configure(state="disabled")
+        self._set_controls_enabled(False)
+
+        def done(result):
+            self.status_var.set("OK — сервер перезапускается. Переподключение через 15с...")
+            # Сервис убивает себя, поэтому переподключаемся с задержкой
+            self.root.after(15000, self._connect_to_server)
+
+        def err(e):
+            self.restart_btn.configure(state="normal")
+            self._set_controls_enabled(True)
+            self.status_var.set("ОШИБКА — не удалось перезапустить")
+            MessageDialog(self.root, "Ошибка", str(e), style="error")
+
+        self.run_bg(self.api.restart_server, on_done=done, on_error=err)
 
     def save_gender(self):
         gender = self.gender_var.get()

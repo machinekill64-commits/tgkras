@@ -77,7 +77,7 @@ async def _get_gigachat_token() -> str:
         resp.raise_for_status()
         result = resp.json()
         _gigachat_token = result["access_token"]
-        _gigachat_token_expires = time.time() + result.get("expires_at", time.time() + 1800)
+        _gigachat_token_expires = float(result['expires_at']) / 1000 if result.get('expires_at') else time.time() + 1800
         logger.info("GigaChat OAuth токен получен, истекает через %d сек",
                     int(_gigachat_token_expires - time.time()))
         return _gigachat_token
@@ -291,7 +291,22 @@ _RETRYABLE_CODES = ["429", "502", "503", "rate limit", "too many requests",
 _GROQ_FALLBACK_MODEL = "qwen/qwen3.8-27b"
 
 
+# GigaChat не принимает параллельные запросы (HTTP 429) — сериализуем все вызовы
+_gigachat_request_lock = asyncio.Lock()
+
+
 async def _gigachat_chat(model: str, messages: list[dict], **kwargs) -> str | None:
+    async with _gigachat_request_lock:
+        for attempt in range(3):
+            try:
+                return await _gigachat_chat_once(model, messages, **kwargs)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 429 or attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** (attempt + 1))
+
+
+async def _gigachat_chat_once(model: str, messages: list[dict], **kwargs) -> str | None:
     """Прямой вызов GigaChat API через httpx (OAuth + самоподписанный сертификат).
     GigaChat API совместим с OpenAI /chat/completions.
     """

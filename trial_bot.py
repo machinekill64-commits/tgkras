@@ -76,8 +76,7 @@ async def main():
         errors.append("OWNER_TG_ID не настроен")
     has_ai_key = (config.OMNIROUTE_API_KEY or config.GROQ_API_KEY or
                  config.OPENROUTER_API_KEY or config.OPENAI_API_KEY or
-                 config.DEEPSEEK_API_KEY or
-                 (config.GIGACHAT_CLIENT_ID and config.GIGACHAT_CLIENT_SECRET))
+                 config.DEEPSEEK_API_KEY or config.GIGACHAT_API_KEY)
     if not has_ai_key:
         errors.append("Нужен хотя бы один AI провайдер")
 
@@ -98,7 +97,12 @@ async def main():
 
     async def notification_router(**kwargs):
         """Маршрутизатор уведомлений для trial."""
-        await notif_bot.notify_lead(**kwargs)
+        from lead_presentation import prepare_lead_notification
+        kwargs = await prepare_lead_notification(kwargs)
+        if kwargs.get("category", "") in ("HOT_COLD", "WARM_COLD"):
+            await notif_bot.notify_cold_lead(**kwargs)
+        else:
+            await notif_bot.notify_lead(**kwargs)
 
     user_client = UserClient(
         notification_callback=notification_router

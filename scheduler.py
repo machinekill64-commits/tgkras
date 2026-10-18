@@ -8,7 +8,11 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from config import SCHEDULER_TIMEZONE, FOLLOWUP_ENABLED, FOLLOWUP_HOURS_THRESHOLD, FOLLOWUP_MAX, FOLLOWUP_CHECK_INTERVAL_MIN, CHAT_SEARCH_CLEANUP_DAYS
+from telethon.errors import PeerFloodError, FloodWaitError
+from config import (SCHEDULER_TIMEZONE, FOLLOWUP_ENABLED, FOLLOWUP_HOURS_THRESHOLD,
+                    FOLLOWUP_MAX, FOLLOWUP_CHECK_INTERVAL_MIN, CHAT_SEARCH_CLEANUP_DAYS,
+                    FORUM_OUTREACH_ENABLED, OUTREACH_WORKER_INTERVAL_MIN,
+                    HARVEST_MIN_MESSAGES, HARVEST_RECENCY_DAYS, TG_SESSION_NAME)
 import database as db
 import ai_engine
 
@@ -64,6 +68,19 @@ class MessageScheduler:
             )
             logger.info(f"Follow-up checker: каждые {FOLLOWUP_CHECK_INTERVAL_MIN} мин, "
                         f"порог {FOLLOWUP_HOURS_THRESHOLD}ч, макс {FOLLOWUP_MAX}")
+
+        # Воркер приглашений на форум: берёт кандидатов из outreach_targets
+        if FORUM_OUTREACH_ENABLED:
+            self.scheduler.add_job(
+                self._forum_outreach_worker,
+                trigger="interval",
+                minutes=OUTREACH_WORKER_INTERVAL_MIN,
+                id="forum_outreach",
+                name="Рассылка приглашений на форум",
+                misfire_grace_time=300,
+                coalesce=True,
+            )
+            logger.info(f"Forum outreach worker: каждые {OUTREACH_WORKER_INTERVAL_MIN} мин")
 
         # Ежедневная очистка старых найденных чатов (в 3:00 ночи)
         self.scheduler.add_job(
@@ -315,6 +332,67 @@ class MessageScheduler:
                 await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"Follow-up ошибка для диалога #{dialog['id']}: {e}", exc_info=True)
+
+    async def _forum_outreach_worker(self):
+        """Периодически отправляет приглашения новым активным участникам чатов."""
+        if not self.user_client:
+            return
+        if self.user_client.is_paused:
+            logger.info("Бот на паузе — воркер приглашений пропущен")
+            return
+        if not await self.user_client.anti_ban.can_send_cold():
+            return
+
+        targets = await db.get_pending_outreach_targets(
+            limit=5, min_messages=HARVEST_MIN_MESSAGES,
+            recency_days=HARVEST_RECENCY_DAYS)
+        for target in targets:
+            if not await self.user_client.anti_ban.can_send_cold():
+                break
+            try:
+                # Мульти-аккаунт: атомарный захват цели до отправки —
+                # второй аккаунт получит False и возьмёт следующего
+                claimed = await db.claim_outreach_target(
+                    target["id"], claimer=TG_SESSION_NAME)
+                if not claimed:
+                    continue
+                # Квалификация: DIRECT/PAIN/WARM_COLD пишем, REJECT пропускаем
+                category = await ai_engine.classify_forum_candidate(
+                    target.get("sample_texts") or target.get("last_message_text") or "")
+                if category == "REJECT":
+                    await db.mark_outreach_target(target["id"], "REJECTED")
+                    continue
+                try:
+                    status = await self.user_client.send_forum_invite(target)
+                except (PeerFloodError, FloodWaitError) as e:
+                    # Аккаунт в флуд-лимите — цель обратно в очередь,
+                    # цикл останавливаем до следующего интервала
+                    logger.error(
+                        f"{type(e).__name__}: аккаунт ограничен — цель "
+                        f"#{target['id']} возвращена в очередь, цикл остановлен")
+                    await db.release_outreach_target(target["id"])
+                    break
+                if status == "sent":
+                    await db.mark_outreach_target(target["id"], "SENT")
+                    await self._notify_owner(
+                        f"📩 Приглашение на форум отправлено: {target.get('sender_name')} "
+                        f"(чат «{target.get('chat_name')}»)"
+                    )
+                elif status == "skipped_male":
+                    await db.mark_outreach_target(target["id"], "SKIPPED_MALE")
+                elif status == "skipped_city":
+                    await db.mark_outreach_target(target["id"], "SKIPPED_CITY")
+                elif status == "skipped":
+                    await db.mark_outreach_target(target["id"], "SKIPPED")
+                elif status == "limited":
+                    # Лимит на отправку — возвращаем цель в очередь,
+                    # её сможет взять любой аккаунт позже
+                    await db.release_outreach_target(target["id"])
+                    break
+                else:
+                    await db.mark_outreach_target(target["id"], "FAILED")
+            except Exception as e:
+                logger.error(f"Ошибка приглашения target #{target['id']}: {e}", exc_info=True)
 
     async def _cleanup_found_chats(self):
         """Ежедневная очистка найденных чатов старше CHAT_SEARCH_CLEANUP_DAYS дней."""

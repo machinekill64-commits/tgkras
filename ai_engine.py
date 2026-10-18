@@ -24,7 +24,11 @@ from config import (OMNIROUTE_API_KEY, OMNIROUTE_BASE_URL,
                     COLD_CLASSIFY_PROMPT,
                     BROADCAST_PROMPT, NO_RULES_MARKER, DIRECT_PROMPT,
                     BROADCAST_LANGUAGE_INSTRUCTIONS,
-                    DEVELOPER_INFO, DEVELOPER_GENDER)
+                    DEVELOPER_INFO, DEVELOPER_GENDER,
+                    FORUM_NAME, FORUM_DATE, FORUM_VENUE,
+                    FORUM_TICKET_URL, FORUM_PROMO_CODE, FORUM_DISCOUNT,
+                    FORUM_TIME, FORUM_SPEAKERS, FORUM_PROGRAM, FORUM_INSTAGRAM,
+                    FORUM_DESCRIPTION)
 from price_catalog import catalog_for_broadcast_prompt
 
 logger = logging.getLogger(__name__)
@@ -976,3 +980,334 @@ async def generate_message_variants(base_text: str, count: int = 3) -> list[str]
     except Exception as e:
         logger.error(f"Ошибка генерации вариантов: {e}")
         return [base_text]
+
+
+# === Forum outreach ===
+
+
+def _forum_facts() -> str:
+    return (
+        f"Мероприятие: {FORUM_NAME}\n"
+        f"Позиционирование: {FORUM_DESCRIPTION}\n"
+        f"Дата и время: {FORUM_DATE}, {FORUM_TIME}\n"
+        f"Место: {FORUM_VENUE}\n"
+        f"Спикеры: {FORUM_SPEAKERS}\n"
+        f"Программа: {FORUM_PROGRAM}\n"
+        f"Ссылка на билеты: {FORUM_TICKET_URL}\n"
+        f"Промокод на скидку {FORUM_DISCOUNT}: {FORUM_PROMO_CODE}\n"
+        f"Атмосфера прошлых мероприятий: {FORUM_INSTAGRAM}"
+    )
+
+
+async def classify_forum_candidate(sample_texts: str) -> str:
+    """Квалификация активного участника чата по его сообщениям.
+    Возвращает DIRECT | PAIN | WARM_COLD | REJECT.
+    """
+    prompt = f"""Ты — аналитик аудитории женского делового форума в Краснодаре.
+Тебе даны последние сообщения человека из Telegram-чата. Определи, подходит ли
+он под целевую аудиторию форума ({FORUM_NAME}: карьера, личный бренд, баланс, нетворкинг).
+
+Категории (ответ строго одним словом):
+DIRECT — человек прямо ищет то, что даёт форум: женский форум, нетворкинг,
+  мероприятия по саморазвитию, «куда сходить», знакомства с предпринимателями.
+PAIN — есть боль, которую форум закрывает: выгорание, «не знаю куда двигаться»,
+  рутина, «хочу больше денег», «потеряла себя в декрете», нет окружения.
+WARM_COLD — в жизни событие, форум уместен: открыла салон/бизнес, запускает
+  магазин, повышение, вышла из декрета, хочет свой бизнес, ищет смену деятельности.
+REJECT — не ЦА: мужские темы, не Краснодар, спам/реклама/бот, болтовня без
+  отношения к развитию и бизнесу.
+
+Сообщения человека:
+{sample_texts[:1500]}
+
+Ответь строго одним словом: DIRECT, PAIN, WARM_COLD или REJECT."""
+    try:
+        content = await _chat_with_fallback(
+            CLASSIFY_AI_PROVIDER, CLASSIFY_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.1, max_tokens=10,
+        )
+        verdict = (content or "").strip().upper()
+        return verdict if verdict in {"DIRECT", "PAIN", "WARM_COLD"} else "REJECT"
+    except Exception as e:
+        logger.error(f"Ошибка квалификации кандидата на приглашение: {e}")
+        return "REJECT"
+
+
+async def extract_forum_topic(message_text: str) -> str | None:
+    """Короткая тема сообщения для персонализации приглашения (вариант B)."""
+    try:
+        content = await _chat_with_fallback(
+            CLASSIFY_AI_PROVIDER, CLASSIFY_MODEL,
+            [{"role": "user", "content":
+              "В 2-4 словах назови тему этого сообщения по-русски "
+              f"(например: «открытии салона», «выгорании на работе», «поиске идей»).\n"
+              f"Сообщение: «{message_text[:300]}»\nТолько тема, без пояснений."}],
+            temperature=0.2, max_tokens=20,
+        )
+        topic = (content or "").strip().strip("«»\"'")
+        return topic if 3 <= len(topic) <= 50 else None
+    except Exception as e:
+        logger.error(f"Ошибка извлечения темы: {e}")
+        return None
+
+
+async def extract_person_name(sender_name: str, sample_texts: str = "") -> str | None:
+    """Извлекает настоящее имя из ника Telegram и сообщений.
+    «Мария 💅 маникюр» → Мария; «beauty_master» → None; «я Лена» в тексте → Лена.
+    Русские имена отдаём кириллицей (Anna → Анна)."""
+    prompt = f"""Найди настоящее женское или мужское имя человека.
+Источники: ник в Telegram и его сообщения (часто представляются: «я Лена», «Оксана, мастер бровей»).
+Русские имена верни кириллицей с большой буквы (Anna → Анна, Masha → Маша).
+Если настоящего имени нет — ответь ровно «NONE».
+
+Ник: «{sender_name or ''}»
+Сообщения: «{sample_texts[:400]}»
+
+Ответь только именем или NONE."""
+    try:
+        content = await _chat_with_fallback(
+            CLASSIFY_AI_PROVIDER, CLASSIFY_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.1, max_tokens=12,
+        )
+        name = (content or "").strip().strip("«»\"'.").title()
+        if name.upper() == "NONE" or not (2 <= len(name) <= 20):
+            return None
+        return name
+    except Exception as e:
+        logger.error(f"Ошибка извлечения имени: {e}")
+        return None
+
+
+async def detect_person_gender(name: str, sample_texts: str) -> str:
+    """Определяет пол автора: female | male | unknown.
+    Признаки: имя, женские окончания глаголов прошедшего времени в русском
+    (устала, открыла, вышла), самоназвания (мама, предпринимательница).
+    При ошибке — unknown (не отсекаем)."""
+    prompt = f"""Определи пол автора по имени и тексту его сообщений (русский язык).
+Сильные признаки: женские окончания глаголов прошедшего времени
+(устала, открыла, вышла, работала, хотела), самоназвания
+(мама, предпринимательница, хозяйка, я девушка/женщина).
+Мужские: устал, открыл, вышел, предприниматель, мужские имена.
+Неоднозначные имена (Саша, Женя, Валя) без грамматики пола — unknown.
+
+Имя: {name or 'неизвестно'}
+Сообщения:
+{sample_texts[:1200]}
+
+Ответь строго одним словом: female, male или unknown."""
+    try:
+        content = await _chat_with_fallback(
+            CLASSIFY_AI_PROVIDER, CLASSIFY_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.1, max_tokens=8,
+        )
+        v = (content or "").strip().lower()
+        return v if v in {"female", "male"} else "unknown"
+    except Exception as e:
+        logger.error(f"Ошибка определения пола: {e}")
+        return "unknown"
+
+
+async def detect_person_city(sample_texts: str, city: str = "Краснодар") -> str:
+    """Определяет город автора по его сообщениям: local | other | unknown.
+    Признаки local: упоминания города, Кубани, районов Краснодара
+    (ЦМР, КМР, ФМР, Западный обход, Энка, Гидрострой, Прикубанский округ).
+    other: явный другой город. При ошибке — unknown (не отсекаем)."""
+    prompt = f"""Определи, живёт ли автор сообщений в городе {city}.
+Признаки «local»: упоминает {city}, Кубань, районы/места {city}а
+(ЦМР, КМР, ФМР, Западный обход, Энка, Гидрострой, Прикубанский округ,
+Галерея, Красная улица).
+Признаки «other»: явно живёт в другом городе (упоминает Москву, Ростов,
+Сочи и т.п. как свой город или место работы).
+Если город не понятен — unknown.
+
+Сообщения:
+{sample_texts[:1200]}
+
+Ответь строго одним словом: local, other или unknown."""
+    try:
+        content = await _chat_with_fallback(
+            CLASSIFY_AI_PROVIDER, CLASSIFY_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.1, max_tokens=8,
+        )
+        v = (content or "").strip().lower()
+        return v if v in {"local", "other"} else "unknown"
+    except Exception as e:
+        logger.error(f"Ошибка определения города: {e}")
+        return "unknown"
+
+
+async def analyze_opener_reply(reply_text: str) -> dict:
+    """Классификация ответа на вопрос «чем занимаетесь?».
+    Возвращает {"gender": FEMALE|MALE|UNCLEAR, "city": LOCAL|OTHER|UNCLEAR}."""
+    prompt = f"""Человеку задали вопрос «чем вы занимаетесь?». Вот его ответ:
+«{reply_text[:600]}»
+
+Определи два признака:
+1) Пол: FEMALE (женские окончания, самоназвания) / MALE (мужские) / UNCLEAR.
+2) Город: LOCAL (живёт в Краснодаре или Краснодарском крае, включая пригороды:
+   Прикубанский округ, Энка, посёлки под Краснодаром) / OTHER (явно другой
+   город: Москва, Ростов, Сочи и т.п.) / UNCLEAR.
+
+Ответь строго двумя словами через пробел, например: FEMALE LOCAL или MALE UNCLEAR."""
+    result = {"gender": "UNCLEAR", "city": "UNCLEAR"}
+    try:
+        content = await _chat_with_fallback(
+            CLASSIFY_AI_PROVIDER, CLASSIFY_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.1, max_tokens=10,
+        )
+        parts = (content or "").strip().upper().split()
+        if parts and parts[0] in {"FEMALE", "MALE", "UNCLEAR"}:
+            result["gender"] = parts[0]
+        if len(parts) > 1 and parts[1] in {"LOCAL", "OTHER", "UNCLEAR"}:
+            result["city"] = parts[1]
+    except Exception as e:
+        logger.error(f"Ошибка анализа ответа на опенер: {e}")
+    return result
+
+
+async def generate_forum_invite(sender_name: str, context_message: str) -> str | None:
+    """Первое сообщение-приглашение активному участнику чата."""
+    prompt = (
+        "Ты — организатор делового форума для женщин в Краснодаре. "
+        "Напиши первое личное сообщение активной участнице тематического чата — "
+        "короткое, тёплое и ненавязчивое приглашение на мероприятие.\n\n"
+        f"{_forum_facts()}\n\n"
+        f"Имя собеседницы: {sender_name or 'неизвестно'}\n"
+        f"Её недавнее сообщение в чате: «{(context_message or '')[:200]}»\n\n"
+        "Требования:\n"
+        "- 2-4 коротких предложения, до 600 символов.\n"
+        "- Обратись по имени, если оно выглядит как настоящее имя (не ник/не реклама).\n"
+        "- Не дави, без восклицательного спама, максимум 1-2 уместных эмодзи.\n"
+        "- Обязательно дай ссылку на билеты и промокод.\n"
+        "- Не выдумывай факты о человеке; мягко упомяни, что увидели её активность в чате.\n"
+        "- Верни ТОЛЬКО готовый текст сообщения, без пояснений."
+    )
+    try:
+        content = await _chat_with_fallback(
+            DIALOG_AI_PROVIDER, DIALOG_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.8, max_tokens=400,
+        )
+        return content.strip() if content else None
+    except Exception as e:
+        logger.error(f"Ошибка генерации приглашения на форум: {e}")
+        return None
+
+
+async def generate_forum_reply(messages_history: list[dict]) -> str | None:
+    """Ответ в диалоге с приглашённой: про форум, билеты и регистрацию."""
+    system = (
+        "Ты — Елена, организатор и продавец билетов женского форума "
+        "«Современная женщина» в Краснодаре (25 октября, Hampton by Hilton). "
+        "Ты сама начала этот диалог — первое сообщение был вопрос, чем "
+        "собеседница занимается.\n\n"
+        "Твоя единственная цель — ПРОДАТЬ БИЛЕТ. Не рассказать о форуме, не "
+        "поболтать — продать. Каждое твоё сообщение должно двигать сделку "
+        "вперёд.\n\n"
+        "ВЕРОНКА ПРОДАЖИ — всегда понимай, на каком ты шаге:\n"
+        "1. Контакт → выясни, чем занимается и что её цепляет (работа, свой "
+        "проект, энергия, деньги, баланс). Это крючок — запомни его.\n"
+        "2. Потребность → свяжи её занятие с темой форума. Не перечисляй "
+        "программу — назови ОДНО, что зацепит именно её: продажам — личный "
+        "бренд и нетворкинг, маме в декрете — пособия и самореализация, "
+        "уставшей — энергию и баланс.\n"
+        "3. Презентация → ценность через выгоду: «за полдня ты унесёшь "
+        "контакты, инструменты и заряд, на который в другое время уйдёт "
+        "неделя».\n"
+        "4. Возражения → приёмы ниже.\n"
+        "5. Закрытие → ссылка на билеты + промокод + Instagram с атмосферой.\n\n"
+        "ОТРАБОТКА ВОЗРАЖЕНИЙ — никогда не сдавайся после первого «нет»:\n"
+        "- Сначала признай возражение («понимаю», «логично») — это снимает "
+        "защиту.\n"
+        "- Затем уточни причину вопросом — люди продают сами себе, когда "
+        "объясняют.\n"
+        "- «Дорого» → согласие + промокод на 30% + пересчёт ценности: «это не "
+        "трата, это инвестиция — одно новое знакомство окупает билет».\n"
+        "- «Подумаю» → мягкий дожим: «что именно смущает — место, время, "
+        "программа?» Плюс дефицит: промокод и места ограничены.\n"
+        "- «Некогда» → «это полдня раз в год — как раз тем, у кого нет "
+        "времени, форум и нужен».\n"
+        "- «Не интересно» → уточни, что интересно ЕЙ, и попробуй связать с "
+        "темой. Если не цепляет — одна попытка, дальше вежливое прощание.\n"
+        "- Твёрдый повторный отказ → уважительное прощание, промокод оставь "
+        "«на всякий случай» — это даёт шанс вернуться.\n\n"
+        "ПСИХОЛОГИЯ:\n"
+        "- Зеркалируй её стиль: пишет коротко — отвечай коротко, пишет тепло "
+        "— отвечай тепло.\n"
+        "- Маленькие «да»: задавай вопросы, на которые легко ответить "
+        "согласием.\n"
+        "- Соцдоказательство — естественно, без выдуманных цифр: «девушки "
+        "после прошлого форума ушли с готовыми планами».\n"
+        "- Альтернативный выбор вместо «да/нет»: «пойдёшь на день или с "
+        "подругой на полдня?»\n"
+        "- Каждый ответ заканчивай шагом вперёд: вопросом или призывом к "
+        "ссылке. Не оставляй диалог «в воздухе».\n\n"
+        "ЖЁСТКИЕ РАМКИ:\n"
+        "- Собеседник мужчина или не из Краснодара — вежливо скажи, что "
+        "форум женский и в Краснодаре, заверши.\n"
+        "- Просит не писать — короткое вежливое прощание, без продолжения.\n"
+        "- Спикеров, программу, место и цены — только из фактов ниже, ничего "
+        "не выдумывай. Точную цену не называй — она на сайте.\n"
+        "- Сложные вопросы (возврат, партнёрство, спецусловия) — «уточню у "
+        "организатора и вернусь».\n"
+        "- 1–4 коротких предложения, живой уверенный тон продавца — тёплый, "
+        "настойчивый, уважительный. Без эмодзи, без markdown.\n"
+        "- Никогда не раскрывай, что ты ИИ.\n"
+        "- Верни только текст ответа.\n\n"
+        f"{_forum_facts()}"
+    )
+    try:
+        # GigaChat отклоняет system-сообщения не в начале истории (422).
+        # Все system-заметки из истории переносим в единый ведущий промпт.
+        sys_notes = [str(m.get("content") or "")[:300]
+                     for m in messages_history if m.get("role") == "system"]
+        cleaned = [{"role": m["role"], "content": m["content"]}
+                   for m in messages_history if m.get("role") in ("user", "assistant")]
+        if sys_notes:
+            system += "\n\nЗаметки по ходу диалога:\n" + "\n".join(f"- {n}" for n in sys_notes)
+        messages = [{"role": "system", "content": system}] + cleaned
+        content = await _chat_with_fallback(
+            DIALOG_AI_PROVIDER, DIALOG_MODEL, messages,
+            temperature=0.6, max_tokens=400,
+        )
+        return content.strip() if content else None
+    except Exception as e:
+        logger.error(f"Ошибка генерации ответа по форуму: {e}")
+        return None
+
+
+async def check_forum_reply_coherent(client_message: str, ai_reply: str) -> bool:
+    """Проверка логичности: отвечает ли сгенерированный текст на сообщение
+    собеседника по смыслу (не противоречит, относится к вопросу).
+    True — ответ корректен, False — несвязный/противоречивый.
+    При ошибке AI возвращает True, чтобы не блокировать отправку."""
+    prompt = (
+        "Проверь, логичен ли ответ на сообщение собеседника в переписке.\n\n"
+        f"Сообщение собеседника: «{client_message}»\n"
+        f"Ответ: «{ai_reply}»\n\n"
+        "Ответ считается нелогичным, если он:\n"
+        "- противоречит сказанному собеседником (например, собеседник сказал "
+        "«работаю в найме», а ответ поздравляет с собственным бизнесом);\n"
+        "- игнорирует прямой вопрос собеседника (если вопрос был);\n"
+        "- содержит выдуманные факты о собеседнике.\n\n"
+        "Если сообщение собеседника короткое или не содержит вопроса "
+        "(«хорошо», «ок», «понятно»), ответ логичен, когда он естественно "
+        "продолжает диалог, а не когда дословно «отвечает» на фразу.\n\n"
+        "Верни одно слово: OK — если ответ логичен, BAD — если нелогичен."
+    )
+    try:
+        content = await _chat_with_fallback(
+            CLASSIFY_AI_PROVIDER, CLASSIFY_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.0, max_tokens=10,
+        )
+        verdict = (content or "OK").strip().upper()
+        return verdict.startswith("OK")
+    except Exception as e:
+        logger.error(f"Ошибка проверки логичности ответа: {e}")
+        return True

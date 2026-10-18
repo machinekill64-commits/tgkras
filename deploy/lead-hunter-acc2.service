@@ -1,0 +1,18 @@
+[Unit]
+Description=LeadHunter Worker (Telegram account #2, forum outreach)
+After=network.target
+# Читает ту же data/bot.db — дедуп через CLAIMED работает против lead-hunter.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/lead-hunter
+Environment=PYTHONUNBUFFERED=1
+# Прокси и имя сессии аккаунта #2 — в отдельном env-файле (не в репо):
+EnvironmentFile=/opt/lead-hunter/acc2.env
+ExecStart=/opt/lead-hunter/.venv/bin/python worker_acc2.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

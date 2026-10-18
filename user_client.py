@@ -9,11 +9,21 @@ from datetime import datetime
 from telethon import TelegramClient, events, connection
 from telethon.tl.custom import Message
 from telethon.tl import types as tl_types
+from telethon.errors import PeerFloodError, FloodWaitError
 from config import (TG_API_ID, TG_API_HASH, TG_PHONE, TG_SESSION_NAME,
                     TG_MTPROTO_HOST, TG_MTPROTO_PORT, TG_MTPROTO_SECRET,
                     TG_PROXY_TYPE, TG_PROXY_HOST, TG_PROXY_PORT,
                     TG_PROXY_USERNAME, TG_PROXY_PASSWORD,
-                    COLD_LEAD_ENABLED, FOLLOWUP_MAX)
+                    COLD_LEAD_ENABLED, FOLLOWUP_MAX,
+                    FORUM_OUTREACH_ENABLED, HARVEST_MIN_MSG_LEN,
+                    FORUM_CLOSING_TEXT, FORUM_FOLLOWUP_TEXT,
+                    FORUM_FOLLOWUP_ENABLED,
+                    FORUM_OPENER_VARIANTS,
+                    FORUM_DECLINE_TEXT,
+                    FORUM_MSG_COOLDOWN_MIN, FORUM_MSG_COOLDOWN_MAX,
+                    FORUM_REPLY_TEMPLATES, FORUM_SPEAKERS, FORUM_PROGRAM, FORUM_TIME,
+                    FORUM_DATE, FORUM_VENUE, FORUM_PROMO_CODE, FORUM_DISCOUNT,
+                    FORUM_TICKET_URL, FORUM_INSTAGRAM)
 import database as db
 from anti_ban import AntiBan
 from lead_qualification import qualify_lead
@@ -130,6 +140,7 @@ class UserClient:
         self.anti_ban = AntiBan()
         self.notification_callback = notification_callback
         self._monitored_chat_ids: set[int] = set()
+        self._harvest_chat_ids: set[int] = set()
         self._running = False
         self._paused = False
         self._me_id: int | None = None
@@ -144,6 +155,11 @@ class UserClient:
         # Если тот же отправитель пишет то же сообщение повторно — пропускаем AI
         self._spam_cache: dict[tuple[int, str], float] = {}
         self._spam_cache_ttl = 86400  # 24 часа
+        # Кэш input-entity отправителей ЛС: sender_id -> InputPeer.
+        # Входящее ЛС от незнакомца приходит как UpdateShortMessage без
+        # access_hash — без этого кэша send_message(sender_id) падает с
+        # "Could not find the input entity".
+        self._input_peers: dict[int, object] = {}
 
     @property
     def is_paused(self) -> bool:
@@ -177,6 +193,8 @@ class UserClient:
         self._me_id = me.id
         self._register_handlers()
         self._running = True
+        if FORUM_OUTREACH_ENABLED and self._harvest_chat_ids:
+            logger.info(f"Forum outreach: сбор активных из {len(self._harvest_chat_ids)} чатов")
 
     async def stop(self):
         self._running = False
@@ -186,7 +204,9 @@ class UserClient:
         """Загружает список отслеживаемых чатов из БД."""
         chats = await db.get_monitored_chats()
         self._monitored_chat_ids = {c["chat_id"] for c in chats}
-        logger.info(f"Отслеживается чатов: {len(self._monitored_chat_ids)}")
+        self._harvest_chat_ids = await db.get_harvest_chat_ids()
+        logger.info(f"Отслеживается чатов: {len(self._monitored_chat_ids)}, "
+                    f"сбор участников: {len(self._harvest_chat_ids)}")
 
     async def reload_chats(self):
         """Перезагрузка списка чатов (вызывается при добавлении нового чата)."""
@@ -199,7 +219,7 @@ class UserClient:
         async def on_new_message(event):
             """Обработка нового сообщения в чате."""
             chat_id = event.chat_id
-            if chat_id not in self._monitored_chat_ids:
+            if chat_id not in self._monitored_chat_ids and chat_id not in self._harvest_chat_ids:
                 return
 
             # Игнорируем свои собственные сообщения (кэшированный ID)
@@ -316,6 +336,14 @@ class UserClient:
             return
         self._spam_cache[spam_key] = now
 
+        # Сбор активных участников для приглашений на форум (без AI-квалификации)
+        if FORUM_OUTREACH_ENABLED and event.chat_id in self._harvest_chat_ids:
+            await self._harvest_candidate(event, meta, text)
+
+        # Лид-пайплайн работает только по чатам с флагом мониторинга
+        if event.chat_id not in self._monitored_chat_ids:
+            return
+
         # Квалификация лида — единственный финальный фильтр (семафор на AI-вызовы)
         async with self._lead_semaphore:
             result = await qualify_lead(text, message.date, sender_is_bot,
@@ -389,6 +417,131 @@ class UserClient:
                 **lead_meta,
             )
 
+    async def _harvest_candidate(self, event, meta: dict, text: str):
+        """Сохраняет активного участника harvest-чата как кандидата на приглашение."""
+        try:
+            sender_id = meta.get("sender_id")
+            if not sender_id or meta.get("sender_type") != "user":
+                return
+            if sender_id == self._me_id:
+                return
+            if len((text or "").strip()) < HARVEST_MIN_MSG_LEN:
+                return  # отсев команд, стикеров, односложных реплик
+            chat_entity = await event.get_chat()
+            chat_name = getattr(chat_entity, "title", str(event.chat_id))
+            await db.upsert_outreach_target(
+                chat_id=event.chat_id, chat_name=chat_name,
+                sender_id=sender_id, sender_name=meta["sender_name"],
+                sender_username=meta.get("sender_username"),
+                message_text=text,
+            )
+        except Exception as e:
+            logger.error(f"Ошибка сбора кандидата на приглашение: {e}")
+
+    async def send_forum_invite(self, target: dict) -> str:
+        """Отправка приглашения на форум активному участнику.
+        Возвращает статус: 'sent' | 'skipped' | 'limited' | 'failed'.
+        """
+        import ai_engine
+
+        if self._paused:
+            return "limited"
+        sender_id = target["sender_id"]
+        if not sender_id or sender_id == self._me_id:
+            return "skipped"
+        if await db.has_seen_user(sender_id):
+            return "skipped"
+        if not await self.anti_ban.can_send_cold():
+            return "limited"
+
+        # Предварительная проверка пола по имени и грамматике сообщений
+        gender = await ai_engine.detect_person_gender(
+            target.get("sender_name", ""),
+            target.get("sample_texts") or target.get("last_message_text") or "")
+        if gender == "male":
+            logger.info(f"Кандидат {target.get('sender_name')} определён как мужчина — пропуск")
+            return "skipped_male"
+
+        # Предварительная проверка города по сообщениям
+        city_verdict = await ai_engine.detect_person_city(
+            target.get("sample_texts") or target.get("last_message_text") or "")
+        if city_verdict == "other":
+            logger.info(f"Кандидат {target.get('sender_name')} явно не из Краснодара — пропуск")
+            return "skipped_city"
+
+        # Первое касание — опенер «чем занимаетесь?» (A/B по весам конверсии)
+        import random
+        chosen_variant = 0
+        if FORUM_OPENER_VARIANTS:
+            weights = await db.ab_get_weights(len(FORUM_OPENER_VARIANTS))
+            chosen_variant = random.choices(
+                range(len(FORUM_OPENER_VARIANTS)), weights=weights, k=1)[0]
+            template = FORUM_OPENER_VARIANTS[chosen_variant]
+            text = await self._fill_invite_template(template, target)
+        else:
+            text = None
+        if not text:
+            return "failed"
+
+        await self._forum_cooldown()
+        success = await self._send_message(sender_id, text)
+        if not success:
+            return "failed"
+
+        await db.mark_user_seen(sender_id)
+        await self.anti_ban.record_cold_action(
+            sender_id, target.get("sender_name", ""), text)
+        dialog_id = await db.create_dialog(
+            lead_id=0, sender_id=sender_id,
+            sender_name=target.get("sender_name", ""),
+            sender_username=target.get("sender_username"),
+            lead_source="forum_outreach",
+        )
+        messages = [
+            {"role": "system", "content": "Приглашение на форум отправлено организатором."},
+            {"role": "assistant", "content": text},
+        ]
+        await db.update_dialog_messages(dialog_id, json.dumps(messages, ensure_ascii=False))
+        await db.update_dialog_stage(dialog_id, "FORUM_OPENER")
+        await db.set_dialog_ab_variant(dialog_id, chosen_variant)
+        await db.ab_record_sent(chosen_variant)
+        logger.info(f"Опенер отправлен {target.get('sender_name')} "
+                    f"({sender_id}), вариант #{chosen_variant}")
+        return "sent"
+
+    async def _fill_invite_template(self, template: str, target: dict) -> str | None:
+        """Подстановка плейсхолдеров в шаблон приглашения."""
+        import ai_engine
+        name_raw = (target.get("sender_name") or "").strip()
+        first_name = name_raw.split()[0] if name_raw else ""
+        if not (first_name and first_name.isalpha()):
+            # Ник декоративный/латинский — AI ищет настоящее имя в нике и сообщениях
+            ai_name = await ai_engine.extract_person_name(
+                name_raw, target.get("last_message_text") or "")
+            if ai_name:
+                first_name = ai_name
+        name = f", {first_name}" if first_name and first_name.isalpha() else ""
+        greeting = f"Здравствуйте, {first_name}" if first_name and first_name.isalpha() else "Здравствуйте"
+
+        topic = "актуальную для вас тему"
+        if "{topic}" in template:
+            extracted = await ai_engine.extract_forum_topic(
+                target.get("last_message_text") or "")
+            if extracted:
+                topic = extracted
+
+        try:
+            return template.format(
+                name=name, greeting=greeting, topic=topic,
+                chat=target.get("chat_name") or "тематическом чате",
+                date=FORUM_DATE, time=FORUM_TIME, venue=FORUM_VENUE,
+                promo=FORUM_PROMO_CODE, discount=FORUM_DISCOUNT,
+                url=FORUM_TICKET_URL, instagram=FORUM_INSTAGRAM,
+            )
+        except (KeyError, IndexError) as e:
+            logger.error(f"Ошибка подстановки в шаблон приглашения: {e}")
+            return None
+
     async def _process_cold_lead(self, event, cold_result: 'LeadResult', text: str):
         """Сохраняет холодного лид и уведомляет владельца."""
         sender = await event.get_sender()
@@ -454,6 +607,16 @@ class UserClient:
         text = event.message.text or ""
         if not text.strip():
             return
+
+        # Кэшируем input-entity отправителя — у UpdateShortMessage нет
+        # access_hash, иначе ответ по голому id не резолвится
+        if sender_id not in self._input_peers:
+            try:
+                peer = await event.get_input_sender()
+                if peer is not None:
+                    self._input_peers[sender_id] = peer
+            except Exception:
+                pass
 
         # Логируем сразу, но обработку откладываем
         dialog = await db.get_dialog_by_sender(sender_id)
@@ -561,6 +724,11 @@ class UserClient:
         messages = json.loads(dialog.get("ai_messages_json") or "[]")
         messages.append({"role": "user", "content": client_message})
         await db.update_dialog_messages(dialog["id"], json.dumps(messages, ensure_ascii=False))
+
+        # Форумные диалоги — отдельный лёгкий контур, без sales engine
+        if dialog.get("lead_source") == "forum_outreach":
+            await self._continue_forum_dialog(dialog, messages, client_message)
+            return
 
         try:
             analysis = await sales_engine.analyze_turn(dialog, messages, client_message)
@@ -738,8 +906,180 @@ class UserClient:
         else:
             await self._notify_human_required(dialog, client_message, "Не удалось сформировать безопасный ответ")
 
+    async def _continue_forum_dialog(self, dialog: dict, messages: list[dict],
+                                     client_message: str):
+        """Диалог с приглашённой: стоп-слова/отказы — без AI, всё остальное —
+        AI отвечает по смыслу сообщения и контексту переписки (без сценария)."""
+        import ai_engine
+
+        # Диалог закрыт (отказ/стоп-слова/закрытие) — молчим, не отвечаем
+        if dialog.get("stage") == "ENDED":
+            return
+
+        if re.search(r"(?i)(не\s*(надо|нужно|интересно|пишите|беспоко|звоните)|"
+                     r"отстань|спам|стоп|отпишись|хватит)", client_message):
+            await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
+            await db.update_dialog_stage(dialog["id"], "ENDED")
+            logger.info(f"Форумный диалог #{dialog['id']} закрыт по просьбе клиента")
+            return
+
+        # Отказ: первый — AI отрабатывает возражение, повторный — завершаем
+        refusal_re = re.compile(
+            r"(?i)(не\s*(пойду|приду|буду|хочу|смогу|получится|интересно)|"
+            r"передумал|не\s*смогу\s*прийти|в\s*другой\s*раз|"
+            r"нет\s*,?\s*спасибо|не\s*актуально)")
+        farewell_re = re.compile(
+            r"(?i)\b(до\s*свидания|прощай|всего\s*доброго|всего\s*хорошего)\b")
+        if refusal_re.search(client_message):
+            refusals = sum(
+                1 for m in messages
+                if m.get("role") == "user"
+                and refusal_re.search(str(m.get("content") or "")))
+            if refusals >= 2 or farewell_re.search(client_message):
+                decline = FORUM_DECLINE_TEXT.format(promo=FORUM_PROMO_CODE)
+                await self._send_and_record(dialog, messages, decline, "ENDED")
+                await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
+                await db.update_dialog_stage(dialog["id"], "ENDED")
+                logger.info(f"Форумный диалог #{dialog['id']}: повторный отказ — завершён")
+                return
+            # Первый отказ — деликатная попытка отработать возражение через AI
+            messages.append({
+                "role": "system",
+                "content": "Собеседница отказалась — это первый отказ. Сделай "
+                           "одну деликатную попытку отработать возражение: "
+                           "признай его, уточни причину вопросом и предложи "
+                           "решение. Не дави и не прощайся."})
+        elif farewell_re.search(client_message):
+            decline = FORUM_DECLINE_TEXT.format(promo=FORUM_PROMO_CODE)
+            await self._send_and_record(dialog, messages, decline, "ENDED")
+            await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
+            await db.update_dialog_stage(dialog["id"], "ENDED")
+            logger.info(f"Форумный диалог #{dialog['id']}: прощание — завершён")
+            return
+
+        # Готова купить — шлём ссылку+промокод+атмосферу и уведомляем владельца
+        if re.search(r"(?i)(готова?|давайте|купить|куплю|оплатить|записать|"
+                     r"зарегистри|беру билет|приду|буду участв|иду на форум)",
+                     client_message):
+            closing = FORUM_CLOSING_TEXT.format(
+                url=FORUM_TICKET_URL, promo=FORUM_PROMO_CODE,
+                discount=FORUM_DISCOUNT, instagram=FORUM_INSTAGRAM,
+                program=FORUM_PROGRAM)
+            await self._send_and_record(dialog, messages, closing, "FORUM_CHAT")
+            await db.update_dialog_sales_data(dialog["id"], ready_to_work=1,
+                                              interest_level="HOT")
+            await self._notify_human_required(
+                dialog, client_message,
+                "Клиент готов купить билет на форум — отправлена ссылка и промокод")
+            # Пуш заказчикам через отчётный бот (если настроен)
+            try:
+                import report_bot
+                rbot = report_bot.get_bot()
+                if rbot:
+                    await report_bot.notify_hot_lead(rbot, dialog)
+            except Exception as e:
+                logger.warning(f"Отчётный бот: пуш о HOT-лиде не отправлен: {e}")
+            return
+
+        # AI отвечает по смыслу сообщения: интенты пишутся в заметку для контекста
+        intents = self._forum_detect_intents(client_message)
+        # Память диалога: фиксируем последний факт и интенты в истории
+        messages.append({
+            "role": "system",
+            "content": f"last_user_fact={client_message[:150]}; intents={','.join(intents) or 'none'}"
+        })
+        reply, unresolved = await self._forum_compose_reply(messages, client_message, intents)
+        await self._send_and_record(dialog, messages, reply, "FORUM_CHAT")
+        if unresolved:
+            await self._notify_human_required(
+                dialog, client_message, "Нестандартный вопрос в форумном диалоге")
+
+    def _forum_detect_intents(self, text: str) -> list[str]:
+        """Все интенты сообщения (мульти-интент), в порядке приоритета шаблонов."""
+        patterns = [
+            ("price", r"(?i)(сколько\s*(стоит|это)|цена|стоимость|сколько\s*денег|прайс)"),
+            ("speakers", r"(?i)(спикер|кто[^.?!]{0,25}(выступ|рассказ|будет)|ведущ)"),
+            ("program", r"(?i)(программ|что\s*будет|расписание|расписан)"),
+            ("venue", r"(?i)(где\s*(будет|проходит|находится)|где[?!]?\s*$|адрес|когда|"
+                       r"во\s*сколько|время)"),
+            ("expensive", r"(?i)(дорого|дорог|не\s*по\s*карману|бюджет)"),
+            ("think", r"(?i)(подума|позже|потом|не\s*сейчас|вернусь\s*позже)"),
+            ("friend", r"(?i)(с\s+(другом|подруг|мужем|знаком|коллег)|вдвоём|вдвоем|"
+                       r"вместе|двоих|не\s*одна|не\s*одной)"),
+        ]
+        return [name for name, pat in patterns if re.search(pat, text)]
+
+    def _forum_intent_text(self, intent: str) -> str | None:
+        """Шаблонный ответ по одному интенту с подстановкой фактов форума.
+        Возвращает None, если шаблоны отключены (чистый AI-режим)."""
+        tpl = FORUM_REPLY_TEMPLATES.get(intent)
+        if not tpl:
+            return None
+        return tpl.format(
+            url=FORUM_TICKET_URL, promo=FORUM_PROMO_CODE, discount=FORUM_DISCOUNT,
+            date=FORUM_DATE, time=FORUM_TIME, venue=FORUM_VENUE,
+            speakers=FORUM_SPEAKERS, program=FORUM_PROGRAM,
+            instagram=FORUM_INSTAGRAM)
+
+    async def _forum_compose_reply(self, messages: list[dict], client_message: str,
+                                   intents: list[str]) -> tuple[str, bool]:
+        """AI отвечает на все сообщения по фактам форума и контексту диалога.
+        Шаблоны по интентам — только fallback при недоступном AI.
+        Возвращает (текст, unresolved)."""
+        import ai_engine
+        ai_reply = await ai_engine.generate_forum_reply(messages)
+        if ai_reply:
+            # Уведомляем владельца на нестандартный вопрос — для контроля качества
+            return ai_reply, not intents
+        # Шаблоны отключены (чистый AI-тест): AI недоступен —
+        # уточнение + уведомление владельцу
+        return ("Уточните, пожалуйста, что именно интересует — "
+                "цена, программа, спикеры или место проведения?"), True
+
+    async def wait_for_reply(self, sender_id: int, timeout: int = 600,
+                             poll: int = 10) -> str | None:
+        """Ждёт реальное входящее сообщение от собеседника (polling get_messages).
+        Возвращает текст первого нового входящего сообщения после baseline
+        или None по таймауту. Нужен для честного живого теста и потоков,
+        где следующий шаг зависит от ответа собеседника."""
+        from datetime import timezone
+        baseline = datetime.now(timezone.utc)
+        deadline = baseline.timestamp() + timeout
+        seen: set[int] = set()
+        # Фиксируем уже существующие сообщения, чтобы не поймать старые
+        try:
+            for m in await self.client.get_messages(sender_id, limit=10):
+                if m:
+                    seen.add(m.id)
+        except Exception as e:
+            logger.warning(f"wait_for_reply: не удалось прочитать историю: {e}")
+        while time.time() < deadline:
+            if self._paused:
+                return None
+            try:
+                msgs = await self.client.get_messages(sender_id, limit=5)
+            except Exception as e:
+                logger.warning(f"wait_for_reply: get_messages упал: {e}")
+                await asyncio.sleep(poll)
+                continue
+            for m in msgs:
+                if (m and m.id not in seen and not m.out
+                        and m.message and m.message.strip()):
+                    return m.message.strip()
+            await asyncio.sleep(poll)
+        return None
+
+    async def _forum_cooldown(self):
+        """Рандомный кулдаун 5с-5мин перед исходящим сообщением форумного контура."""
+        import random
+        delay = random.uniform(FORUM_MSG_COOLDOWN_MIN, FORUM_MSG_COOLDOWN_MAX)
+        logger.info(f"Кулдаун перед сообщением: {delay:.0f}с")
+        await asyncio.sleep(delay)
+
     async def _send_and_record(self, dialog: dict, messages: list[dict], text: str,
                                stage: str) -> bool:
+        if dialog.get("lead_source") == "forum_outreach":
+            await self._forum_cooldown()
         success = await self._send_message(dialog["sender_id"], text)
         if not success:
             if not self._paused:
@@ -793,11 +1133,19 @@ class UserClient:
         await self.anti_ban.wait_typing(text)
 
         try:
-            await self.client.send_message(sender_id, text)
+            entity = self._input_peers.get(sender_id)
+            if entity is None:
+                entity = await self.client.get_input_entity(sender_id)
+            await self.client.send_message(entity, text)
             await self.anti_ban.record_action()
             await db.log_message(0, sender_id, "", text, 0, "outgoing")
             logger.info(f"Отправлено сообщение для {sender_id}: {text[:60]}...")
             return True
+        except (PeerFloodError, FloodWaitError) as e:
+            # Аккаунт-вайд ограничение — пробрасываем наверх, чтобы воркер
+            # вернул цель в очередь, а не помечал её FAILED навсегда
+            logger.error(f"Аккаунт ограничен Telegram ({type(e).__name__}): {e}")
+            raise
         except Exception as e:
             logger.error(f"Ошибка отправки сообщения: {e}")
             return False
@@ -1018,6 +1366,25 @@ class UserClient:
 
         messages = json.loads(dialog.get("ai_messages_json") or "[]")
         followup_count = dialog.get("followup_count", 0)
+
+        # Форумные диалоги — фиксированный текст напоминания про промокод.
+        # Автоотправка отключена (FORUM_FOLLOWUP_ENABLED=0): пропускаем диалог.
+        if dialog.get("lead_source") == "forum_outreach":
+            if not FORUM_FOLLOWUP_ENABLED or not FORUM_FOLLOWUP_TEXT:
+                await db.update_dialog_stage(dialog["id"], "ENDED")
+                logger.info(f"Follow-up выключен — диалог #{dialog['id']} завершён без напоминания")
+                return False
+            followup_msg = FORUM_FOLLOWUP_TEXT.format(
+                date=FORUM_DATE, promo=FORUM_PROMO_CODE, url=FORUM_TICKET_URL)
+            messages.append({"role": "assistant", "content": followup_msg})
+            await db.update_dialog_messages(dialog["id"], json.dumps(messages, ensure_ascii=False))
+            await db.increment_followup(dialog["id"])
+            await self._forum_cooldown()
+            success = await self._send_message(dialog["sender_id"], followup_msg, fast=True)
+            if success:
+                logger.info(f"Forum follow-up #{followup_count + 1} для диалога #{dialog['id']}")
+                return True
+            return False
 
         context = (
             f"Клиент не ответил на ваше последнее сообщение. "

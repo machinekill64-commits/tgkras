@@ -176,6 +176,24 @@ CREATE TABLE IF NOT EXISTS found_chats (
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(chat_id)
 );
+
+CREATE TABLE IF NOT EXISTS outreach_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    chat_name TEXT,
+    sender_id INTEGER NOT NULL,
+    sender_name TEXT,
+    sender_username TEXT,
+    last_message_text TEXT,
+    msg_count INTEGER DEFAULT 1,
+    sample_texts TEXT,
+    first_seen_at TEXT DEFAULT (datetime('now')),
+    last_seen_at TEXT DEFAULT (datetime('now')),
+    status TEXT DEFAULT 'NEW',
+    sent_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(sender_id)
+);
 """
 
 
@@ -190,6 +208,7 @@ async def init_db():
         await _migrate_leads(db)
         await _migrate_cold_leads(db)
         await _migrate_dialogs(db)
+        await _migrate_outreach_targets(db)
         await db.commit()
 
 
@@ -209,6 +228,8 @@ async def _migrate_chats(db):
         await db.execute("ALTER TABLE chats ADD COLUMN chat_niche TEXT")
     if "broadcast_language" not in columns:
         await db.execute("ALTER TABLE chats ADD COLUMN broadcast_language TEXT DEFAULT 'ru'")
+    if "is_harvest" not in columns:
+        await db.execute("ALTER TABLE chats ADD COLUMN is_harvest INTEGER DEFAULT 0")
 
 
 async def _migrate_messages_log(db):
@@ -249,6 +270,18 @@ async def _migrate_cold_leads(db):
     for name, definition in additions.items():
         if name not in columns:
             await db.execute(f"ALTER TABLE cold_leads ADD COLUMN {name} {definition}")
+
+
+async def _migrate_outreach_targets(db):
+    """Добавляет новые колонки в outreach_targets, если их ещё нет."""
+    async with db.execute("PRAGMA table_info(outreach_targets)") as cursor:
+        columns = {row[1] for row in await cursor.fetchall()}
+    for name, definition in (("msg_count", "INTEGER DEFAULT 1"),
+                             ("sample_texts", "TEXT"),
+                             ("first_seen_at", "TEXT"),
+                             ("claimed_by", "TEXT")):
+        if name not in columns:
+            await db.execute(f"ALTER TABLE outreach_targets ADD COLUMN {name} {definition}")
 
 
 async def _migrate_dialogs(db):
@@ -361,7 +394,7 @@ async def update_chat(chat_id: int, chat_name: str = None, is_monitored: bool = 
                       broadcast_times: str = None, message_text: str = None,
                       message_variants: list[str] = None, schedule_cron: str = None,
                       is_direct_promo: bool = None, chat_niche: str = None,
-                      broadcast_language: str = None):
+                      broadcast_language: str = None, is_harvest: bool = None):
     """Полное обновление чата (для API синхронизации с GUI)."""
     import json
     async with aiosqlite.connect(DB_PATH) as db:
@@ -401,12 +434,166 @@ async def update_chat(chat_id: int, chat_name: str = None, is_monitored: bool = 
         if broadcast_language is not None:
             updates.append("broadcast_language = ?")
             params.append(broadcast_language)
+        if is_harvest is not None:
+            updates.append("is_harvest = ?")
+            params.append(1 if is_harvest else 0)
         
         if updates:
             params.append(chat_id)
             query = f"UPDATE chats SET {', '.join(updates)} WHERE chat_id = ?"
             await db.execute(query, params)
             await db.commit()
+
+
+async def get_harvest_chat_ids() -> set[int]:
+    """ID чатов, из которых собираем активных участников для рассылки приглашений."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT chat_id FROM chats WHERE is_harvest = 1") as cursor:
+            return {row[0] for row in await cursor.fetchall()}
+
+
+async def upsert_outreach_target(chat_id: int, chat_name: str, sender_id: int,
+                                 sender_name: str, sender_username: str | None,
+                                 message_text: str):
+    """Запоминает активного участника чата как кандидата на приглашение.
+    Дедуп по sender_id: повторное сообщение обновляет last_seen, статус не трогает.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO outreach_targets
+               (chat_id, chat_name, sender_id, sender_name, sender_username,
+                last_message_text, sample_texts)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(sender_id) DO UPDATE SET
+                   last_seen_at = datetime('now'),
+                   msg_count = outreach_targets.msg_count + 1,
+                   last_message_text = excluded.last_message_text,
+                   sample_texts = substr(
+                       COALESCE(outreach_targets.sample_texts, '') || char(10) || excluded.sample_texts,
+                       -800),
+                   chat_id = excluded.chat_id,
+                   chat_name = excluded.chat_name,
+                   sender_name = excluded.sender_name,
+                   sender_username = COALESCE(excluded.sender_username, outreach_targets.sender_username)
+               WHERE outreach_targets.status = 'NEW'""",
+            (chat_id, chat_name, sender_id, sender_name, sender_username,
+             (message_text or "")[:300], (message_text or "")[:200]),
+        )
+        await db.commit()
+
+
+async def get_pending_outreach_targets(limit: int = 10,
+                                       min_messages: int = 3,
+                                       recency_days: int = 3) -> list[dict]:
+    """Кандидаты, прошедшие скоринг: >= min_messages сообщений
+    и последняя активность не старше recency_days."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM outreach_targets
+               WHERE status = 'NEW'
+                 AND msg_count >= ?
+                 AND datetime(last_seen_at) >= datetime('now', ?)
+               ORDER BY last_seen_at DESC LIMIT ?""",
+            (min_messages, f"-{recency_days} days", limit),
+        ) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+
+async def claim_outreach_target(target_id: int, claimer: str) -> bool:
+    """Атомарный захват кандидата перед отправкой (мульти-аккаунт).
+    True — цель захвачена этим процессом, False — уже занята другим."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """UPDATE outreach_targets
+               SET status = 'CLAIMED', claimed_by = ?
+               WHERE id = ? AND status = 'NEW'""",
+            (claimer, target_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def release_outreach_target(target_id: int):
+    """Вернуть захваченного кандидата в NEW (если отправка не началась)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE outreach_targets SET status = 'NEW' "
+            "WHERE id = ? AND status = 'CLAIMED'",
+            (target_id,),
+        )
+        await db.commit()
+
+
+async def mark_outreach_target(target_id: int, status: str):
+    """SENT / FAILED / SKIPPED — фиксация результата отправки."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE outreach_targets SET status = ?, sent_at = datetime('now') WHERE id = ?",
+            (status, target_id),
+        )
+        await db.commit()
+
+
+async def get_outreach_stats() -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT status, COUNT(*) FROM outreach_targets GROUP BY status"
+        ) as cursor:
+            return {row[0]: row[1] for row in await cursor.fetchall()}
+
+
+async def get_forum_report() -> dict:
+    """Сводка кампании для отчётного бота заказчиков:
+    найдено кандидатов, отправлено приглашений, ответили, уговорены."""
+    from config import REPORT_EXCLUDE_SENDER_IDS
+    excl = ",".join(str(x) for x in REPORT_EXCLUDE_SENDER_IDS) or "0"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        stats = {}
+        async with db.execute(
+            "SELECT status, COUNT(*) c FROM outreach_targets GROUP BY status"
+        ) as cur:
+            stats["targets"] = {r["status"]: r["c"] for r in await cur.fetchall()}
+        async with db.execute(
+            f"""SELECT COUNT(*) c FROM dialogs
+                WHERE lead_source = 'forum_outreach' AND stage != 'FORUM_OPENER'
+                  AND sender_id NOT IN ({excl})"""
+        ) as cur:
+            stats["replied"] = (await cur.fetchone())["c"]
+        async with db.execute(
+            f"""SELECT COUNT(*) c FROM dialogs
+                WHERE lead_source = 'forum_outreach' AND interest_level = 'HOT'
+                  AND sender_id NOT IN ({excl})"""
+        ) as cur:
+            stats["hot"] = (await cur.fetchone())["c"]
+        async with db.execute(
+            f"""SELECT COUNT(*) c FROM dialogs
+                WHERE lead_source = 'forum_outreach' AND stage = 'ENDED'
+                  AND sender_id NOT IN ({excl})"""
+        ) as cur:
+            stats["ended"] = (await cur.fetchone())["c"]
+        return stats
+
+
+async def get_forum_leads(hot_only: bool = False, limit: int = 15) -> list[dict]:
+    """Форумные диалоги для отчёта: имя, контакт, стадия, интерес."""
+    from config import REPORT_EXCLUDE_SENDER_IDS
+    excl = ",".join(str(x) for x in REPORT_EXCLUDE_SENDER_IDS) or "0"
+    where = ("WHERE lead_source = 'forum_outreach' "
+             f"AND sender_id NOT IN ({excl})")
+    if hot_only:
+        where += " AND interest_level = 'HOT'"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"""SELECT sender_id, sender_name, sender_username, stage,
+                       interest_level, ready_to_work, updated_at
+                FROM dialogs {where}
+                ORDER BY updated_at DESC LIMIT ?""",
+            (limit,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 async def get_broadcast_chats() -> list[dict]:
@@ -779,7 +966,7 @@ async def get_stale_dialogs(hours_threshold: int = 24, max_followups: int = 2) -
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT * FROM dialogs
-               WHERE stage IN ('INITIATING', 'QUALIFYING', 'NEGOTIATING')
+               WHERE stage IN ('INITIATING', 'QUALIFYING', 'NEGOTIATING', 'FORUM_CHAT')
                  AND followup_count < ?
                  AND datetime(updated_at) < datetime('now', ?)
                ORDER BY updated_at ASC""",
@@ -1116,4 +1303,5 @@ async def get_all_found_chat_ids() -> set[int]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT chat_id FROM found_chats") as cursor:
             rows = await cursor.fetchall()
+            return {row[0] for row in rows}
             return {row[0] for row in rows}

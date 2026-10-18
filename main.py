@@ -130,7 +130,8 @@ async def main():
             schedule_cron=data.get("schedule_cron"),
             is_direct_promo=data.get("is_direct_promo", False),
             chat_niche=data.get("chat_niche", ""),
-            broadcast_language=data.get("broadcast_language", "ru")
+            broadcast_language=data.get("broadcast_language", "ru"),
+            is_harvest=data.get("is_harvest", False)
         )
         # Применяем изменения сразу, без перезапуска сервиса
         await user_client.reload_chats()

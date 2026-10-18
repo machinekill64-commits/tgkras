@@ -43,6 +43,20 @@ AI_HTTP_PROXY = os.getenv("AI_HTTP_PROXY", "").strip() or TG_BOT_PROXY
 NOTIF_BOT_TOKEN = os.getenv("NOTIF_BOT_TOKEN", "")
 OWNER_TG_ID = int(os.getenv("OWNER_TG_ID", "0"))
 
+# === Report Bot (aiogram) — отчётность для заказчиков ===
+# Отдельный бот: показывает лиды и конверсии, отвечает только
+# Telegram ID из REPORT_BOT_ALLOWED_IDS (+ OWNER_TG_ID).
+REPORT_BOT_TOKEN = os.getenv("REPORT_BOT_TOKEN", "")
+REPORT_BOT_ALLOWED_IDS = [
+    int(x) for x in os.getenv("REPORT_BOT_ALLOWED_IDS", "").split(",")
+    if x.strip().isdigit()
+]
+# Тестовые собеседники — исключаются из отчётов заказчикам
+REPORT_EXCLUDE_SENDER_IDS = [
+    int(x) for x in os.getenv("REPORT_EXCLUDE_SENDER_IDS", "8625531933").split(",")
+    if x.strip().isdigit()
+]
+
 # === AI Providers ===
 # Поддерживаемые провайдеры: omniroute, groq, openrouter, openai, deepseek
 #
@@ -99,7 +113,8 @@ ANTI_BAN_MIN_DELAY = int(os.getenv("ANTI_BAN_MIN_DELAY", "30"))
 ANTI_BAN_MAX_DELAY = int(os.getenv("ANTI_BAN_MAX_DELAY", "300"))
 ANTI_BAN_HOURLY_LIMIT = int(os.getenv("ANTI_BAN_HOURLY_LIMIT", "10"))
 ANTI_BAN_DAILY_LIMIT = int(os.getenv("ANTI_BAN_DAILY_LIMIT", "37"))
-WARMUP_DAYS = int(os.getenv("WARMUP_DAYS", "3"))
+# Прогрев 5-7 дней для женской аудитории (спека: дольше, чем 3)
+WARMUP_DAYS = int(os.getenv("WARMUP_DAYS", "6"))
 MAX_MESSAGE_AGE_DAYS = int(os.getenv("MAX_MESSAGE_AGE_DAYS", "30"))
 
 # === Database ===
@@ -114,7 +129,22 @@ CHAT_SEARCH_KEYWORDS = [
     "фриланс,ищу разработчика,IT заказы,разработка под ключ,ищу программиста,заказ на разработку,веб разработка,"
     "заказ на сайт,разработка сайта,создание сайта,разработка бота,telegram бот разработка,"
     "ищу исполнителя,нужен разработчик,заказ приложения,mobile разработка,"
-    "backend разработка,frontend разработка,python разработчик"
+    "backend разработка,frontend разработка,python разработчик,"
+    # Краснодар: бизнес и нетворкинг
+    "бизнес краснодар,предприниматели краснодар,нетворкинг краснодар,бизнес чат краснодар,"
+    "бизнес клуб краснодар,деловые краснодар,бизнес сообщество краснодар,бизнес кубань,"
+    # Краснодар: женская аудитория (бизнес, без мамских)
+    "женский клуб краснодар,женский чат краснодар,женщины краснодар,девушки краснодар,"
+    "женское предпринимательство,бизнесвумен,бизнес леди краснодар,деловые женщины,"
+    "женский бизнес краснодар,предпринимательницы краснодар,самозанятые краснодар,"
+    # Бьюти-сфера и эксперты — ядро ЦА форума
+    "мастера красоты краснодар,бьюти мастера краснодар,салон красоты краснодар чат,"
+    "психология краснодар,коуч краснодар,психолог краснодар,эксперты краснодар,"
+    # Краснодар: афиша и мероприятия
+    "афиша краснодар,мероприятия краснодар,события краснодар,форум краснодар,куда сходить краснодар,"
+    # Темы форума (федеральные чаты)
+    "личный бренд,женское развитие,женская карьера,женский нетворкинг,"
+    "предпринимательницы,эксперты чат,самореализация"
     ).split(",") if k.strip()]
 CHAT_SEARCH_MAX_RESULTS = int(os.getenv("CHAT_SEARCH_MAX_RESULTS", "100"))
 CHAT_SEARCH_MIN_MEMBERS = int(os.getenv("CHAT_SEARCH_MIN_MEMBERS", "100"))
@@ -681,9 +711,128 @@ COLD_LEAD_EXCLUDE_KEYWORDS = [
     "ничего сложного", "без опыта", "без сложных навыков",
 ]
 
-COLD_OUTREACH_DAILY_LIMIT = int(os.getenv("COLD_OUTREACH_DAILY_LIMIT", "13"))
-COLD_OUTREACH_HOURLY_LIMIT = int(os.getenv("COLD_OUTREACH_HOURLY_LIMIT", "2"))
+# Лимит первых касаний: 5 новых людей в день на аккаунт (4 аккаунта = 20/день)
+COLD_OUTREACH_DAILY_LIMIT = int(os.getenv("COLD_OUTREACH_DAILY_LIMIT", "5"))
+COLD_OUTREACH_HOURLY_LIMIT = int(os.getenv("COLD_OUTREACH_HOURLY_LIMIT", "1"))
 COLD_LEAD_ENABLED = os.getenv("COLD_LEAD_ENABLED", "true").lower() in ("1", "true", "yes")
+
+# === Forum Outreach (сбор активных участников + приглашения) ===
+# Режим: собираем активных людей из чатов с флагом is_harvest и пишем им в ЛС
+FORUM_OUTREACH_ENABLED = os.getenv("FORUM_OUTREACH_ENABLED", "true").lower() in ("1", "true", "yes")
+FORUM_NAME = os.getenv("FORUM_NAME", "Форум «Современная женщина»")
+FORUM_DATE = os.getenv("FORUM_DATE", "25 октября")
+FORUM_VENUE = os.getenv("FORUM_VENUE", "Hampton by Hilton, Краснодар")
+FORUM_TICKET_URL = os.getenv("FORUM_TICKET_URL", "https://eventbestru.timepad.ru/event/4171560/")
+FORUM_PROMO_CODE = os.getenv("FORUM_PROMO_CODE", "УСПЕХ")
+FORUM_DISCOUNT = os.getenv("FORUM_DISCOUNT", "30%")
+# Скоринг активности: >=3 сообщений за 7 дней, последнее <=3 дней назад
+HARVEST_MIN_MESSAGES = int(os.getenv("HARVEST_MIN_MESSAGES", "3"))
+HARVEST_WINDOW_DAYS = int(os.getenv("HARVEST_WINDOW_DAYS", "7"))
+HARVEST_RECENCY_DAYS = int(os.getenv("HARVEST_RECENCY_DAYS", "3"))
+# Минимальная длина сообщения, чтобы человек считался «живым» (отсев команд/стикеров)
+HARVEST_MIN_MSG_LEN = int(os.getenv("HARVEST_MIN_MSG_LEN", "15"))
+# Как часто воркер пытается отправить приглашение (минуты)
+OUTREACH_WORKER_INTERVAL_MIN = int(os.getenv("OUTREACH_WORKER_INTERVAL_MIN", "45"))
+# Рандомный кулдаун перед каждым исходящим сообщением форумного контура (секунды)
+FORUM_MSG_COOLDOWN_MIN = int(os.getenv("FORUM_MSG_COOLDOWN_MIN", "5"))
+FORUM_MSG_COOLDOWN_MAX = int(os.getenv("FORUM_MSG_COOLDOWN_MAX", "300"))
+# Расширенные факты форума для диалога
+FORUM_TIME = os.getenv("FORUM_TIME", "10:30–16:00")
+FORUM_SPEAKERS = os.getenv(
+    "FORUM_SPEAKERS",
+    "гипнотерапевт Эдгар Енокян, косметолог Диана Жданова, бизнесвумен Лиана Атаева, "
+    "эксперт по пособиям Екатерина Рыдченко, бизнес-тренер Елена Куликова")
+FORUM_PROGRAM = os.getenv(
+    "FORUM_PROGRAM",
+    "карьера и самореализация, личный бренд, энергия и баланс, новые знакомства, "
+    "вдохновение; кофе-брейк и нетворкинг")
+FORUM_INSTAGRAM = os.getenv("FORUM_INSTAGRAM", "https://www.instagram.com/reel/DdVpHOouczM/")
+# Позиционирование с официальной страницы TimePad
+FORUM_DESCRIPTION = os.getenv(
+    "FORUM_DESCRIPTION",
+    "Современная женщина может всё — если захочет. Форум про поиск внутренней опоры "
+    "и мотивации для личностного роста: как совмещать самореализацию и личную жизнь, "
+    "всё успевать, создавать, совмещать, делегировать, масштабировать.")
+
+# A/B/C варианты первого касания
+# Плейсхолдеры: {name} {greeting} {topic} {chat} {date} {time} {venue} {promo} {discount} {url}
+FORUM_INVITE_VARIANTS = [
+    # A — от организатора, структурированный макет
+    "Представляю форум «Современная женщина».\n\n"
+    "Дата: {date}, {time}\n"
+    "Место: {venue}\n"
+    "Темы: карьера, личный бренд, баланс, новые знакомства\n\n"
+    "По промокоду {promo} — скидка {discount}.\n\n"
+    "Хотите, скину программу?",
+    # B — личная рекомендация с привязкой к теме чата
+    "Увидела ваше сообщение про {topic}.\n\n"
+    "Есть событие, которое может быть вам полезно — форум «Современная женщина»:\n"
+    "Дата: {date}, {time}\n"
+    "Место: {venue}\n"
+    "Темы: карьера, баланс, новые знакомства\n\n"
+    "Хотите подробнее?",
+    # C — вопрос-зацепка
+    "Скажите, вам сейчас ближе тема карьеры или баланса?\n\n"
+    "Спрашиваю, потому что {date} в Краснодаре пройдёт форум «Современная женщина» — "
+    "как раз про это.\n\n"
+    "Могу скинуть программу.",
+]
+
+# Первое касание — вопрос про занятие (приглашение только после ответа)
+# Плейсхолдеры: {greeting} {name} {topic} {chat} {date} {venue} {promo} {discount} {url}
+FORUM_OPENER_VARIANTS = [
+    "{greeting}! Увидела ваше сообщение в чате «{chat}». Подскажите, а чем вы занимаетесь?",
+    "{greeting}! Вы активно пишете в чате «{chat}» — а расскажите, чем занимаетесь?",
+    "{greeting}! Заметила вас в чате «{chat}». Интересно — у вас свой проект или работа в найме?",
+]
+# Ответ, если собеседник оказался мужчиной или не из Краснодара
+FORUM_MALE_DECLINE = "Поняла, спасибо за ответ! Хорошего дня."
+# Уточнение города, если по ответу непонятно, откуда человек
+FORUM_CITY_QUESTION = "Спасибо! А вы сами из Краснодара?"
+
+# Финальное сообщение при готовности купить (плейсхолдеры: {url} {promo} {discount} {instagram} {program})
+FORUM_CLOSING_TEXT = (
+    "Отлично! В программе: {program}.\n\n"
+    "Ссылка на билеты: {url}\n"
+    "Промокод {promo} — скидка {discount}.\n"
+    "Посмотрите атмосферу прошлых мероприятий: {instagram}\n"
+    "Если будут вопросы по оплате — пишите, помогу."
+)
+
+# Вежливый отказ при мягком отказе («не пойду», «не интересно») — плейсхолдер {promo}
+FORUM_DECLINE_TEXT = (
+    "Поняла, без проблем! Если передумаете — пишите, "
+    "промокод {promo} сохраню для вас. Хорошего дня!"
+)
+
+# Автоотправка напоминаний по форуму (выключено: только ответы на сообщения собеседника)
+FORUM_FOLLOWUP_ENABLED = os.getenv("FORUM_FOLLOWUP_ENABLED", "0") == "1"
+# Follow-up приглашённой (мягкое напоминание)
+FORUM_FOLLOWUP_TEXT = (
+    "Здравствуйте! Напоминаю про форум {date}. Промокод {promo} ещё действует. "
+    "Если интересно — вот билеты: {url}"
+)
+
+# Шаблонные ответы в диалоге — ОТКЛЮЧЕНЫ для чистого AI-теста
+# (AI отвечает на всё по фактам форума; раскомментировать для режима fallback)
+# Плейсхолдеры: {url} {promo} {discount} {date} {time} {venue} {speakers} {program} {instagram}
+FORUM_REPLY_TEMPLATES = {
+    # "price": "По промокоду {promo} — скидка {discount}. "
+    #          "Точную цену видно на странице: {url}",
+    # "speakers": "На форуме выступят: {speakers}.",
+    # "program": "В программе: {program}. Всё проходит {date}, {time}.",
+    # "venue": "{date}, {time}. Место: {venue}.",
+    # "expensive": "Понимаю. Именно поэтому есть промокод {promo} — скидка {discount}. "
+    #              "Плюс это не лекция, а день с практическими идеями и знакомствами.",
+    # "think": "Конечно! Только промокод {promo} действует ограниченное время. "
+    #          "Хотите, напомню позже?",
+    # "friend": "Да, можно прийти не одной — на странице можно оформить "
+    #           "сразу несколько билетов: {url}",
+    # "clarify": "Уточните, пожалуйста, что именно интересует — цена, программа, "
+    #            "спикеры или место проведения? Отвечу сразу.",
+    # "default": "Все детали — на странице форума: {url} "
+    #            "Если что-то непонятно — уточню у организатора.",
+}
 
 # Промпт для холодной классификации в чатах
 COLD_CLASSIFY_PROMPT = f"""Ты — аналитик холодных лидов для команды программистов.

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 APP_DIR=/opt/lead-hunter
-REPO_URL="${REPO_URL:-https://github.com/kudinov13/LeadHunter.git}"
+REPO_URL="${REPO_URL:-https://github.com/machinekill64-commits/tgkras.git}"
 
 echo "==> LeadHunter deploy"
 
@@ -39,13 +39,23 @@ mkdir -p "$APP_DIR/data" "$APP_DIR/logs"
 # systemd units
 cp "$APP_DIR/deploy/omniroute.service" /etc/systemd/system/omniroute.service
 cp "$APP_DIR/deploy/lead-hunter.service" /etc/systemd/system/lead-hunter.service
+cp "$APP_DIR/deploy/lead-hunter-acc2.service" /etc/systemd/system/lead-hunter-acc2.service
 systemctl daemon-reload
-systemctl enable omniroute.service lead-hunter.service
+systemctl enable omniroute.service lead-hunter.service lead-hunter-acc2.service
 systemctl restart omniroute.service
 sleep 3
 systemctl restart lead-hunter.service
+# acc2 запускаем только если его env с прокси заполнен — иначе юнит
+# уйдёт в restart-loop без session/прокси
+if [ -f "$APP_DIR/acc2.env" ]; then
+  chmod 600 "$APP_DIR/acc2.env"
+  systemctl restart lead-hunter-acc2.service
+else
+  echo "==> Пропуск acc2: нет $APP_DIR/acc2.env (скопируйте acc2.env.example и заполните)"
+fi
 
 systemctl --no-pager --full status omniroute.service || true
 systemctl --no-pager --full status lead-hunter.service || true
+systemctl --no-pager --full status lead-hunter-acc2.service || true
 
 echo "==> Done. Ensure $APP_DIR/.env and work_account.session exist."

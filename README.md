@@ -1,6 +1,8 @@
-# HunterZetronix — Telegram Lead Generation & Outreach System
+# Forum Outreach Krasnodar — Telegram-система приглашений на форум
 
-Автоматизированная система поиска лидов и outreach для IT-фрилансеров.
+Автоматизированный бот: находит активных участниц тематических чатов
+Краснодара и приглашает их на форум «Современная женщина» — диалоги
+ведёт AI-продавец (GigaChat), доводя до покупки билета.
 
 ## Возможности
 
@@ -52,8 +54,8 @@
 
 ```bash
 # Клонировать репозиторий
-git clone https://github.com/kudinov13/HunterZetronix.git
-cd HunterZetronix
+git clone https://github.com/machinekill64-commits/tgkras.git
+cd tgkras
 
 # Создать виртуальное окружение
 python3 -m venv .venv

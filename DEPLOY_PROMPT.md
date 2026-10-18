@@ -7,7 +7,7 @@ Devin развернёт систему на вашем сервере и соб
 
 ## ПРОМПТ ДЛЯ DEVIN
 
-Ты — DevOps-инженер. Разверни Telegram lead-generation систему HunterZetronix на моём VDS-сервере с нуля, настрой прокси для обхода блокировок Telegram, и собери десктоп-приложение для Windows.
+Ты — DevOps-инженер. Разверни Telegram-систему приглашений на форум Forum Outreach Krasnodar (tgkras) на моём VDS-сервере с нуля, настрой прокси для обхода блокировок Telegram, и собери десктоп-приложение для Windows.
 
 Действуй пошагово. На каждом шаге проверяй результат и исправляй ошибки прежде чем идти дальше.
 
@@ -69,7 +69,7 @@ sudo apt install -y python3.12 python3.12-venv python3.12-dev
 
 ```bash
 cd /opt
-sudo git clone https://github.com/kudinov13/HunterZetronix.git lead-hunter
+sudo git clone https://github.com/machinekill64-commits/tgkras.git lead-hunter
 cd /opt/lead-hunter
 sudo chown -R $(whoami) /opt/lead-hunter
 ```
@@ -331,8 +331,8 @@ curl http://ВАШ_СЕРВЕР_IP:8080/status
 На Windows-машине (твой компьютер):
 
 ```bash
-git clone https://github.com/kudinov13/HunterZetronix.git
-cd HunterZetronix
+git clone https://github.com/machinekill64-commits/tgkras.git
+cd tgkras
 pip install -r requirements.txt
 python build_exe.py
 ```

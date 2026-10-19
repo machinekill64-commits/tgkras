@@ -25,6 +25,23 @@ test_dm.py
 *_out.txt
 av*.txt
 .phone_code_hash_*
+# локальные деплой/SSH-скрипты с паролями — не в репо
+ssh_exec.py
+srv_diff.py
+srv2_check.py
+deploy_now.py
+run_joins.py
+provision2*.py
+prov2*.py
+setup_sync.py
+prov2*.txt
+sync_setup.txt
+sync_peer.json
+COMMIT_MSG.txt
+srv*.txt
+dm_out.txt
+hunt_out.txt
+aa*_out.txt
 DEPLOY_HISTORY.md
 deploy_ssh.py
 deploy_upload.py

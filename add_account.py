@@ -147,34 +147,35 @@ async def authorize_authkey(hex_key: str, session_name: str, proxy: dict):
     return None
 
 
-def ssh_connect():
-    """SSH-подключение: креды из env, иначе из ssh_exec.py."""
+def ssh_connect(ssh_host: str = "", ssh_user: str = "", ssh_pass: str = ""):
+    """SSH-подключение: явные аргументы > env > ssh_exec.py."""
     import paramiko
-    host = os.getenv("SSH_HOST")
-    user = os.getenv("SSH_USER", "root")
-    pw = os.getenv("SSH_PASS")
+    host = ssh_host or os.getenv("SSH_HOST")
+    user = ssh_user or os.getenv("SSH_USER", "root")
+    pw = ssh_pass or os.getenv("SSH_PASS")
     if not host or not pw:
         try:
             import ssh_exec
             host = host or ssh_exec.HOST
-            user = os.getenv("SSH_USER") or ssh_exec.USER
+            user = user or ssh_exec.USER
             pw = pw or ssh_exec.PASS
         except Exception:
             pass
     if not host or not pw:
-        raise RuntimeError("Нет SSH-кредов: задай SSH_HOST/SSH_PASS "
-                           "или обнови ssh_exec.py")
+        raise RuntimeError("Нет SSH-кредов: --host/--ssh-pass, "
+                           "env SSH_HOST/SSH_PASS или ssh_exec.py")
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client.connect(host, username=user, password=pw, timeout=15)
     return client
 
 
-def deploy(num: int, session_name: str) -> bool:
+def deploy(num: int, session_name: str, ssh_host: str = "",
+           ssh_user: str = "", ssh_pass: str = "") -> bool:
     """Заливка accN.env + session + юнит на сервер, запуск воркера."""
     env_path = f"acc{num}.env"
     session_file = session_name + ".session"
-    client = ssh_connect()
+    client = ssh_connect(ssh_host, ssh_user, ssh_pass)
     try:
         sftp = client.open_sftp()
         sftp.put(env_path, f"{REMOTE_DIR}/{env_path}")
@@ -220,6 +221,9 @@ async def main():
                    help="Не авторизовывать — только env (+деплой готовой сессии)")
     p.add_argument("--deploy", action="store_true",
                    help="Залить на сервер и запустить systemd-юнит")
+    p.add_argument("--host", help="SSH хост сервера для деплоя")
+    p.add_argument("--ssh-user", default="", help="SSH логин (по умолч. root)")
+    p.add_argument("--ssh-pass", default="", help="SSH пароль сервера")
     p.add_argument("--no-deploy", action="store_true",
                    help="Только локальные файлы, на сервер не ходить")
     args = p.parse_args()
@@ -302,7 +306,8 @@ async def main():
     if do_deploy:
         print(f"[3/3] Деплой lead-hunter@{num} на сервер...")
         try:
-            deploy(num, session_name)
+            deploy(num, session_name, ssh_host=args.host or "",
+                   ssh_user=args.ssh_user, ssh_pass=args.ssh_pass)
             print(f"\nГОТОВО: воркер lead-hunter@{num} запущен на сервере.")
             print(f"Логи: ssh ... 'journalctl -u lead-hunter@{num} -f'")
         except Exception as e:

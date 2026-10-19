@@ -34,6 +34,14 @@ TG_PROXY_PORT = int(os.getenv("TG_PROXY_PORT", "0") or "0")
 TG_PROXY_USERNAME = os.getenv("TG_PROXY_USERNAME", "").strip()
 TG_PROXY_PASSWORD = os.getenv("TG_PROXY_PASSWORD", "").strip()
 
+# Если прокси для Bot API не задан явно — переиспользуем Telethon-прокси.
+# На серверах в РФ api.telegram.org недоступен напрямую, и без этого
+# aiogram-бот падает с timeout в restart-loop.
+if not TG_BOT_PROXY and TG_PROXY_HOST and TG_PROXY_PORT:
+    _scheme = "socks5" if TG_PROXY_TYPE == "socks5" else "http"
+    _auth = f"{TG_PROXY_USERNAME}:{TG_PROXY_PASSWORD}@" if TG_PROXY_USERNAME else ""
+    TG_BOT_PROXY = f"{_scheme}://{_auth}{TG_PROXY_HOST}:{TG_PROXY_PORT}"
+
 # === Proxy для внешних AI-провайдеров (Groq, OpenRouter и т.п.) ===
 # Groq и некоторые другие провайдеры блокируют запросы с российских IP (403 Forbidden).
 # По умолчанию используем тот же прокси, что и для Telegram Bot API.

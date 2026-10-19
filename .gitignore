@@ -15,8 +15,12 @@ bot.log
 trial_bot.log
 *.log
 start_acc2.ps1
+finish_deploy.ps1
 *_tmp.py
 acc2.env
+DEPLOY_HISTORY.md
+deploy_ssh.py
+deploy_upload.py
 dist/
 build/
 *.spec

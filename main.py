@@ -64,10 +64,13 @@ async def main():
         from lead_presentation import prepare_lead_notification
         kwargs = await prepare_lead_notification(kwargs)
 
-        if kwargs.get("category", "") in ("HOT_COLD", "WARM_COLD"):
-            await notif_bot.notify_cold_lead(**kwargs)
-        else:
-            await notif_bot.notify_lead(**kwargs)
+        try:
+            if kwargs.get("category", "") in ("HOT_COLD", "WARM_COLD"):
+                await notif_bot.notify_cold_lead(**kwargs)
+            else:
+                await notif_bot.notify_lead(**kwargs)
+        except Exception as e:
+            logger.warning(f"Уведомление владельцу не доставлено: {e}")
 
     user_client = UserClient(
         notification_callback=notification_router

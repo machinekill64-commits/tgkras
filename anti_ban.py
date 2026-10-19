@@ -98,8 +98,8 @@ class AntiBan:
     async def wait_typing(self, text: str):
         """Имитирует набор текста перед отправкой (задержка пропорциональна длине)."""
         chars = len(text)
-        typing_time = min(max(chars * 0.05, 2), 15)
-        typing_time += random.uniform(0.5, 2.0)
+        typing_time = min(max(chars * 0.12, 6), 35)
+        typing_time += random.uniform(1.0, 4.0)
         logger.info(f"Имитация набора текста: {typing_time:.1f}с")
         await asyncio.sleep(typing_time)
 

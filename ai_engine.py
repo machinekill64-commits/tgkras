@@ -16,6 +16,7 @@ from config import (OMNIROUTE_API_KEY, OMNIROUTE_BASE_URL,
                     GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3, OPENROUTER_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, NVIDIA_API_KEY,
                     BYTEPLUS_API_KEY, BYTEPLUS_ENDPOINT_ID,
                     GIGACHAT_API_KEY, GIGACHAT_SCOPE, GIGACHAT_BASE_URL, GIGACHAT_OAUTH_URL,
+                    GIGACHAT_FALLBACK_MODELS,
                     AI_HTTP_PROXY,
                     DIALOG_AI_PROVIDER, DIALOG_MODEL,
                     CLASSIFY_AI_PROVIDER, CLASSIFY_MODEL,
@@ -362,22 +363,29 @@ async def _chat_with_fallback(
     # GigaChat — отдельный путь (OAuth + самоподписанный сертификат)
     # При 429/503 ретраим с экспоненциальной задержкой, без OmniRoute
     if provider == "gigachat":
+        chain = [model] + [m for m in GIGACHAT_FALLBACK_MODELS if m != model]
         _gigachat_delays = [3, 8, 15]  # секунды между ретраями
         last_err = None
-        for attempt, delay in enumerate([0] + _gigachat_delays):
-            if delay:
-                logger.warning(f"GigaChat ретрай #{attempt} через {delay}с (ошибка: {last_err})")
-                await asyncio.sleep(delay)
-            try:
-                return await _gigachat_chat(model, messages, **kwargs)
-            except Exception as e:
-                last_err = e
-                error_text = str(e).lower()
-                if not any(code in error_text for code in _RETRYABLE_CODES):
+        for mi, m in enumerate(chain):
+            if mi:
+                logger.warning(
+                    f"GigaChat: {chain[mi - 1]} недоступна/исчерпана — "
+                    f"переключаюсь на {m}")
+            for attempt, delay in enumerate([0] + _gigachat_delays):
+                if delay:
+                    logger.warning(f"GigaChat ретрай #{attempt} через {delay}с (ошибка: {last_err})")
+                    await asyncio.sleep(delay)
+                try:
+                    return await _gigachat_chat(m, messages, **kwargs)
+                except Exception as e:
+                    last_err = e
+                    error_text = str(e).lower()
+                    if any(code in error_text for code in _RETRYABLE_CODES):
+                        continue  # retryable (429/503) — пробуем ещё раз
+                    if "404" in error_text or "no such model" in error_text:
+                        break  # модели не существует — сразу следующая в цепочке
                     raise  # не retryable — сразу выбрасываем
-                # retryable (429/503) — пробуем ещё раз
-                continue
-        logger.error(f"GigaChat: все ретраи исчерпаны ({last_err})")
+        logger.error(f"GigaChat: все модели из цепочки исчерпаны ({last_err})")
         raise last_err
 
     client = _get_client(provider)

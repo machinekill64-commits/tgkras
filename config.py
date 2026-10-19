@@ -101,6 +101,12 @@ GIGACHAT_API_KEY = os.getenv("GIGACHAT_API_KEY", "")
 GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
 GIGACHAT_BASE_URL = "https://gigachat.devices.sberbank.ru/api/v1"
 GIGACHAT_OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+# Запасные модели GigaChat при исчерпании лимитов основной (через запятую).
+# Пример: GIGACHAT_FALLBACK_MODEL="GigaChat-Max,GigaChat-2-Pro"
+GIGACHAT_FALLBACK_MODELS = [
+    m.strip() for m in os.getenv("GIGACHAT_FALLBACK_MODEL", "").split(",")
+    if m.strip()
+]
 
 # Модели для диалогов (по умолчанию OmniRoute — бесплатно, лучшие модели)
 # OmniRoute: "auto/claude-sonnet" (гарантированно Claude Sonnet + fallback),
@@ -744,6 +750,10 @@ OUTREACH_WORKER_INTERVAL_MIN = int(os.getenv("OUTREACH_WORKER_INTERVAL_MIN", "45
 # Рандомный кулдаун перед каждым исходящим сообщением форумного контура (секунды)
 FORUM_MSG_COOLDOWN_MIN = int(os.getenv("FORUM_MSG_COOLDOWN_MIN", "5"))
 FORUM_MSG_COOLDOWN_MAX = int(os.getenv("FORUM_MSG_COOLDOWN_MAX", "300"))
+
+# Пауза перед автоответом в ЛС — имитация «человек прочитал и подумал» (секунды)
+DIALOG_REPLY_DELAY_MIN = int(os.getenv("DIALOG_REPLY_DELAY_MIN", "15"))
+DIALOG_REPLY_DELAY_MAX = int(os.getenv("DIALOG_REPLY_DELAY_MAX", "180"))
 # Расширенные факты форума для диалога
 FORUM_TIME = os.getenv("FORUM_TIME", "10:30–16:00")
 FORUM_SPEAKERS = os.getenv(

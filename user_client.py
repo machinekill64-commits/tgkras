@@ -21,6 +21,7 @@ from config import (TG_API_ID, TG_API_HASH, TG_PHONE, TG_SESSION_NAME,
                     FORUM_OPENER_VARIANTS,
                     FORUM_DECLINE_TEXT,
                     FORUM_MSG_COOLDOWN_MIN, FORUM_MSG_COOLDOWN_MAX,
+                    DIALOG_REPLY_DELAY_MIN, DIALOG_REPLY_DELAY_MAX,
                     FORUM_REPLY_TEMPLATES, FORUM_SPEAKERS, FORUM_PROGRAM, FORUM_TIME,
                     FORUM_DATE, FORUM_VENUE, FORUM_PROMO_CODE, FORUM_DISCOUNT,
                     FORUM_TICKET_URL, FORUM_INSTAGRAM)
@@ -1078,9 +1079,14 @@ class UserClient:
 
     async def _send_and_record(self, dialog: dict, messages: list[dict], text: str,
                                stage: str) -> bool:
+        import random
         if dialog.get("lead_source") == "forum_outreach":
             await self._forum_cooldown()
-        success = await self._send_message(dialog["sender_id"], text)
+        # Пауза перед ответом — имитация того, что человек прочитал и подумал
+        delay = random.uniform(DIALOG_REPLY_DELAY_MIN, DIALOG_REPLY_DELAY_MAX)
+        logger.info(f"Пауза перед ответом {dialog.get('sender_id')}: {delay:.0f}с")
+        await asyncio.sleep(delay)
+        success = await self._send_message(dialog["sender_id"], text, fast=True)
         if not success:
             if not self._paused:
                 await self._notify_human_required(dialog, text, "Сообщение клиенту не отправлено")
@@ -1130,13 +1136,15 @@ class UserClient:
 
         if not fast:
             await self.anti_ban.wait_before_action()
-        await self.anti_ban.wait_typing(text)
 
         try:
             entity = self._input_peers.get(sender_id)
             if entity is None:
                 entity = await self.client.get_input_entity(sender_id)
-            await self.client.send_message(entity, text)
+            # Видимый статус «печатает…» на время имитации набора текста
+            async with self.client.action(entity, 'typing'):
+                await self.anti_ban.wait_typing(text)
+                await self.client.send_message(entity, text)
             await self.anti_ban.record_action()
             await db.log_message(0, sender_id, "", text, 0, "outgoing")
             logger.info(f"Отправлено сообщение для {sender_id}: {text[:60]}...")

@@ -736,6 +736,9 @@ FORUM_OUTREACH_ENABLED = os.getenv("FORUM_OUTREACH_ENABLED", "true").lower() in 
 FORUM_NAME = os.getenv("FORUM_NAME", "Форум «Современная женщина»")
 FORUM_DATE = os.getenv("FORUM_DATE", "25 октября")
 FORUM_VENUE = os.getenv("FORUM_VENUE", "Hampton by Hilton, Краснодар")
+# Имя персоны-организатора в диалогах — должно совпадать с именем профиля
+# аккаунта. У каждого аккаунта (accN.env) можно задать своё.
+BOT_PERSONA_NAME = os.getenv("BOT_PERSONA_NAME", "Елена")
 FORUM_TICKET_URL = os.getenv("FORUM_TICKET_URL", "https://eventbestru.timepad.ru/event/4171560/")
 FORUM_PROMO_CODE = os.getenv("FORUM_PROMO_CODE", "УСПЕХ")
 FORUM_DISCOUNT = os.getenv("FORUM_DISCOUNT", "30%")

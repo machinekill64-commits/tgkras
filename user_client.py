@@ -989,7 +989,8 @@ class UserClient:
             "role": "system",
             "content": f"last_user_fact={client_message[:150]}; intents={','.join(intents) or 'none'}"
         })
-        reply, unresolved = await self._forum_compose_reply(messages, client_message, intents)
+        reply, unresolved = await self._forum_compose_reply(
+            dialog, messages, client_message, intents)
         await self._send_and_record(dialog, messages, reply, "FORUM_CHAT")
         if unresolved:
             await self._notify_human_required(
@@ -1022,13 +1023,15 @@ class UserClient:
             speakers=FORUM_SPEAKERS, program=FORUM_PROGRAM,
             instagram=FORUM_INSTAGRAM)
 
-    async def _forum_compose_reply(self, messages: list[dict], client_message: str,
+    async def _forum_compose_reply(self, dialog: dict, messages: list[dict],
+                                   client_message: str,
                                    intents: list[str]) -> tuple[str, bool]:
         """AI отвечает на все сообщения по фактам форума и контексту диалога.
         Шаблоны по интентам — только fallback при недоступном AI.
         Возвращает (текст, unresolved)."""
         import ai_engine
-        ai_reply = await ai_engine.generate_forum_reply(messages)
+        ai_reply = await ai_engine.generate_forum_reply(
+            messages, sender_name=dialog.get("sender_name") or "")
         if ai_reply:
             # Уведомляем владельца на нестандартный вопрос — для контроля качества
             return ai_reply, not intents

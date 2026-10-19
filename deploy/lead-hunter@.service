@@ -1,0 +1,20 @@
+[Unit]
+Description=LeadHunter Worker (Telegram account %i)
+After=network.target
+# Шаблонный юнит: systemctl enable --now lead-hunter@3 поднимет воркер,
+# который прочитает /opt/lead-hunter/acc3.env (TG_SESSION_NAME, прокси,
+# BOT_PERSONA_NAME). Общий bot_acc1.db — CLAIMED-дедуп между воркерами.
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/lead-hunter
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/lead-hunter/acc%i.env
+ExecStart=/opt/lead-hunter/.venv/bin/python worker_acc2.py
+Restart=always
+RestartSec=10
+MemoryMax=450M
+
+[Install]
+WantedBy=multi-user.target

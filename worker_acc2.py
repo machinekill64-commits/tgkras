@@ -1,6 +1,8 @@
-"""Лёгкий воркер для второго аккаунта (session_acc2).
+"""Лёгкий воркер для дополнительных аккаунтов (acc2, acc3, ...).
 
-Запуск: powershell -File start_acc2.ps1   (задаёт TG_SESSION_NAME + прокси)
+Конфиг берётся целиком из env: TG_SESSION_NAME, TG_PROXY_*, BOT_PERSONA_NAME.
+systemd: lead-hunter@N → /opt/lead-hunter/accN.env.
+Локально: powershell -File start_acc2.ps1   (задаёт TG_SESSION_NAME + прокси)
 
 Без бота владельца и HTTP API — только:
 - слушатель сообщений (харвест кандидатов из is_harvest-чатов,
@@ -22,7 +24,8 @@ logger = logging.getLogger("worker_acc2")
 import database as db
 from user_client import UserClient
 from scheduler import MessageScheduler
-from config import FORUM_OUTREACH_ENABLED, OUTREACH_WORKER_INTERVAL_MIN
+from config import (FORUM_OUTREACH_ENABLED, OUTREACH_WORKER_INTERVAL_MIN,
+                    TG_SESSION_NAME)
 
 
 async def noop_notify(text: str):
@@ -33,7 +36,7 @@ async def main():
     await db.init_db()
 
     user_client = UserClient(notification_callback=None)
-    logger.info("Запуск аккаунта #2 (Telethon)...")
+    logger.info(f"Запуск воркера аккаунта {TG_SESSION_NAME} (Telethon)...")
     await user_client.start()
 
     scheduler = MessageScheduler(

@@ -484,19 +484,26 @@ async def upsert_outreach_target(chat_id: int, chat_name: str, sender_id: int,
 
 async def get_pending_outreach_targets(limit: int = 10,
                                        min_messages: int = 3,
-                                       recency_days: int = 3) -> list[dict]:
+                                       recency_days: int = 3,
+                                       slot: int = -1,
+                                       server_count: int = 2) -> list[dict]:
     """Кандидаты, прошедшие скоринг: >= min_messages сообщений
-    и последняя активность не старше recency_days."""
+    и последняя активность не старше recency_days.
+    slot >= 0 — этот сервер берёт только свою долю: abs(sender_id) % count = slot
+    (детерминированный дедуп между серверами без гонки по CLAIMED)."""
+    sql = """SELECT * FROM outreach_targets
+             WHERE status = 'NEW'
+               AND msg_count >= ?
+               AND datetime(last_seen_at) >= datetime('now', ?)"""
+    params: list = [min_messages, f"-{recency_days} days"]
+    if slot >= 0:
+        sql += " AND abs(CAST(sender_id AS INTEGER)) % ? = ?"
+        params += [server_count, slot]
+    sql += " ORDER BY last_seen_at DESC LIMIT ?"
+    params.append(limit)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT * FROM outreach_targets
-               WHERE status = 'NEW'
-                 AND msg_count >= ?
-                 AND datetime(last_seen_at) >= datetime('now', ?)
-               ORDER BY last_seen_at DESC LIMIT ?""",
-            (min_messages, f"-{recency_days} days", limit),
-        ) as cursor:
+        async with db.execute(sql, params) as cursor:
             return [dict(r) for r in await cursor.fetchall()]
 
 

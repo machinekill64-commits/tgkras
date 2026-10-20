@@ -12,7 +12,8 @@ from telethon.errors import PeerFloodError, FloodWaitError
 from config import (SCHEDULER_TIMEZONE, FOLLOWUP_ENABLED, FOLLOWUP_HOURS_THRESHOLD,
                     FOLLOWUP_MAX, FOLLOWUP_CHECK_INTERVAL_MIN, CHAT_SEARCH_CLEANUP_DAYS,
                     FORUM_OUTREACH_ENABLED, OUTREACH_WORKER_INTERVAL_MIN,
-                    HARVEST_MIN_MESSAGES, HARVEST_RECENCY_DAYS, TG_SESSION_NAME)
+                    HARVEST_MIN_MESSAGES, HARVEST_RECENCY_DAYS, TG_SESSION_NAME,
+                    OUTREACH_SERVER_SLOT, OUTREACH_SERVER_COUNT)
 import database as db
 import ai_engine
 
@@ -345,7 +346,8 @@ class MessageScheduler:
 
         targets = await db.get_pending_outreach_targets(
             limit=5, min_messages=HARVEST_MIN_MESSAGES,
-            recency_days=HARVEST_RECENCY_DAYS)
+            recency_days=HARVEST_RECENCY_DAYS,
+            slot=OUTREACH_SERVER_SLOT, server_count=OUTREACH_SERVER_COUNT)
         for target in targets:
             if not await self.user_client.anti_ban.can_send_cold():
                 break

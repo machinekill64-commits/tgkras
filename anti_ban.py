@@ -7,7 +7,7 @@ import database as db
 from config import (ANTI_BAN_MIN_DELAY, ANTI_BAN_MAX_DELAY,
                     ANTI_BAN_HOURLY_LIMIT, ANTI_BAN_DAILY_LIMIT,
                     COLD_OUTREACH_DAILY_LIMIT, COLD_OUTREACH_HOURLY_LIMIT,
-                    WARMUP_DAYS)
+                    WARMUP_DAYS, TG_SESSION_NAME)
 
 logger = logging.getLogger(__name__)
 
@@ -69,18 +69,19 @@ class AntiBan:
         await db.record_action()
 
     async def can_send_cold(self) -> bool:
-        """Проверяет лимиты холодного обхода."""
+        """Проверяет лимиты холодного обхода ТЕКУЩЕГО аккаунта
+        (type в cold_outreach_log = TG_SESSION_NAME, лимиты по-аккаунтные)."""
         today = datetime.now().strftime("%Y-%m-%d")
         hour = datetime.now().hour
         async with db.aiosqlite.connect(db.DB_PATH) as conn:
             async with conn.execute(
-                "SELECT COUNT(*) FROM cold_outreach_log WHERE DATE(sent_at) = ?",
-                (today,)
+                "SELECT COUNT(*) FROM cold_outreach_log WHERE type = ? AND DATE(sent_at) = ?",
+                (TG_SESSION_NAME, today)
             ) as cursor:
                 daily = (await cursor.fetchone())[0]
             async with conn.execute(
-                "SELECT COUNT(*) FROM cold_outreach_log WHERE DATE(sent_at) = ? AND strftime('%H', sent_at) = ?",
-                (today, f"{hour:02d}")
+                "SELECT COUNT(*) FROM cold_outreach_log WHERE type = ? AND DATE(sent_at) = ? AND strftime('%H', sent_at) = ?",
+                (TG_SESSION_NAME, today, f"{hour:02d}")
             ) as cursor:
                 hourly = (await cursor.fetchone())[0]
         if daily >= COLD_OUTREACH_DAILY_LIMIT:
@@ -93,7 +94,7 @@ class AntiBan:
 
     async def record_cold_action(self, target_id: int, target_name: str, message_text: str, status: str = "sent"):
         """Фиксирует отправку холодного сообщения."""
-        await db.log_cold_outreach("manual", target_id, target_name, message_text, status)
+        await db.log_cold_outreach(TG_SESSION_NAME, target_id, target_name, message_text, status)
 
     async def wait_typing(self, text: str):
         """Имитирует набор текста перед отправкой (задержка пропорциональна длине)."""

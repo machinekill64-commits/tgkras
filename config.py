@@ -750,6 +750,10 @@ HARVEST_RECENCY_DAYS = int(os.getenv("HARVEST_RECENCY_DAYS", "3"))
 HARVEST_MIN_MSG_LEN = int(os.getenv("HARVEST_MIN_MSG_LEN", "15"))
 # Как часто воркер пытается отправить приглашение (минуты)
 OUTREACH_WORKER_INTERVAL_MIN = int(os.getenv("OUTREACH_WORKER_INTERVAL_MIN", "45"))
+# Шардирование целей между серверами: sender_id % COUNT == SLOT.
+# -1 = без шардирования (один сервер). На двух серверах: slot 0 и 1.
+OUTREACH_SERVER_SLOT = int(os.getenv("OUTREACH_SERVER_SLOT", "-1"))
+OUTREACH_SERVER_COUNT = int(os.getenv("OUTREACH_SERVER_COUNT", "2"))
 # Рандомный кулдаун перед каждым исходящим сообщением форумного контура (секунды)
 FORUM_MSG_COOLDOWN_MIN = int(os.getenv("FORUM_MSG_COOLDOWN_MIN", "5"))
 FORUM_MSG_COOLDOWN_MAX = int(os.getenv("FORUM_MSG_COOLDOWN_MAX", "300"))
@@ -805,6 +809,8 @@ FORUM_OPENER_VARIANTS = [
     "{greeting}! Увидела ваше сообщение в чате «{chat}». Подскажите, а чем вы занимаетесь?",
     "{greeting}! Вы активно пишете в чате «{chat}» — а расскажите, чем занимаетесь?",
     "{greeting}! Заметила вас в чате «{chat}». Интересно — у вас свой проект или работа в найме?",
+    "{greeting}! Вы активная участница «{chat}» — расскажите, чем занимаетесь? Мне для одной идеи нужен совет.",
+    "{greeting}! Вижу, вы пишете в «{chat}». А вы сами-то из Краснодара? Хочу кое-что спросить по делу.",
 ]
 # Ответ, если собеседник оказался мужчиной или не из Краснодара
 FORUM_MALE_DECLINE = "Поняла, спасибо за ответ! Хорошего дня."

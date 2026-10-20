@@ -279,7 +279,8 @@ async def _migrate_outreach_targets(db):
     for name, definition in (("msg_count", "INTEGER DEFAULT 1"),
                              ("sample_texts", "TEXT"),
                              ("first_seen_at", "TEXT"),
-                             ("claimed_by", "TEXT")):
+                             ("claimed_by", "TEXT"),
+                             ("claimed_at", "TEXT")):
         if name not in columns:
             await db.execute(f"ALTER TABLE outreach_targets ADD COLUMN {name} {definition}")
 
@@ -492,7 +493,10 @@ async def get_pending_outreach_targets(limit: int = 10,
     slot >= 0 — этот сервер берёт только свою долю: abs(sender_id) % count = slot
     (детерминированный дедуп между серверами без гонки по CLAIMED)."""
     sql = """SELECT * FROM outreach_targets
-             WHERE status = 'NEW'
+             WHERE (status = 'NEW'
+                    OR (status = 'CLAIMED'
+                        AND (claimed_at IS NULL
+                             OR datetime(claimed_at) < datetime('now', '-30 minutes'))))
                AND msg_count >= ?
                AND datetime(last_seen_at) >= datetime('now', ?)"""
     params: list = [min_messages, f"-{recency_days} days"]
@@ -524,8 +528,12 @@ async def claim_outreach_target(target_id: int, claimer: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             """UPDATE outreach_targets
-               SET status = 'CLAIMED', claimed_by = ?
-               WHERE id = ? AND status = 'NEW'""",
+               SET status = 'CLAIMED', claimed_by = ?, claimed_at = datetime('now')
+               WHERE id = ?
+                 AND (status = 'NEW'
+                      OR (status = 'CLAIMED'
+                          AND (claimed_at IS NULL
+                               OR datetime(claimed_at) < datetime('now', '-30 minutes'))))""",
             (claimer, target_id),
         )
         await db.commit()

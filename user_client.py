@@ -1186,19 +1186,24 @@ class UserClient:
                 return await self.client.get_entity(username)
             except Exception:
                 pass
-        name_hint = (target or {}).get("sender_name") or ""
+        raw_name = (target or {}).get("sender_name") or ""
+        # NFKC convierte nombres decorativos («𝒜𝓇𝒾𝓃𝒶» → «Arina») en
+        # algo buscable en la lista de participantes
+        import unicodedata
+        name_hints = [unicodedata.normalize("NFKC", raw_name).strip(), raw_name]
+        name_hints = [h for i, h in enumerate(name_hints) if h and h not in name_hints[:i]]
         chat_ids = [origin_chat_id]
         chat_ids += [cid for cid in self._monitored_chat_ids if cid != origin_chat_id]
         for chat_id in chat_ids:
             chat_entity = await self._get_chat_entity(chat_id)
             if chat_entity is None:
                 continue
-            if name_hint:
+            for hint in name_hints:
                 try:
                     # Buscar en los participantes del chat por nombre —
                     # encuentra aunque no haya posteado recientemente
                     async for p in self.client.iter_participants(
-                            chat_entity, search=name_hint):
+                            chat_entity, search=hint):
                         if p.id == sender_id:
                             return await self.client.get_input_entity(sender_id)
                 except Exception:

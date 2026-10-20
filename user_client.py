@@ -1175,32 +1175,39 @@ class UserClient:
 
     async def _resolve_user_via_chats(self, sender_id: int, origin_chat_id):
         """Resuelve access_hash de un usuario que el acct aún no ha «visto».
-        Intenta el filtro from_user en el chat origen; si no, escanea mensajes
-        recientes en el chat origen y luego en todos los chats monitorizados
-        (Telegram devuelve los objetos `user` junto a los mensajes y Telethon
-        los cachea en la sesión)."""
+        Orden: username directo → búsqueda de participantes por nombre →
+        filtro from_user → escaneo del historial reciente. Telegram devuelve
+        los objetos `user` junto a mensajes/participantes y Telethon los
+        cachea en la sesión."""
+        target = await db.get_outreach_target_by_sender(sender_id)
+        username = (target or {}).get("sender_username")
+        if username:
+            try:
+                return await self.client.get_entity(username)
+            except Exception:
+                pass
+        name_hint = (target or {}).get("sender_name") or ""
         chat_ids = [origin_chat_id]
         chat_ids += [cid for cid in self._monitored_chat_ids if cid != origin_chat_id]
         for chat_id in chat_ids:
-            try:
-                chat_id = int(chat_id)
-                bare, ptype = utils.resolve_id(chat_id)
-                chat_entity = None
-                for cand in (chat_id, ptype(bare), tl_types.PeerChannel(bare)):
-                    try:
-                        chat_entity = await self.client.get_entity(cand)
-                        break
-                    except Exception:
-                        continue
-                if chat_entity is None:
-                    continue
-            except Exception as e:
-                logger.warning(f"Resolviendo {sender_id}: chat {chat_id} inaccesible: {e}")
+            chat_entity = await self._get_chat_entity(chat_id)
+            if chat_entity is None:
                 continue
+            if name_hint:
+                try:
+                    # Buscar en los participantes del chat por nombre —
+                    # encuentra aunque no haya posteado recientemente
+                    async for p in self.client.iter_participants(
+                            chat_entity, search=name_hint):
+                        if p.id == sender_id:
+                            return await self.client.get_input_entity(sender_id)
+                except Exception:
+                    pass
             try:
-                # Ruta rápida: el filtro from_user puede funcionar si Telegram
-                # resuelve el id en el contexto del peer
-                async for msg in self.client.iter_messages(chat_entity, from_user=sender_id, limit=1):
+                # El filtro from_user puede funcionar si Telegram resuelve el
+                # id en el contexto del peer
+                async for msg in self.client.iter_messages(
+                        chat_entity, from_user=sender_id, limit=1):
                     try:
                         return await self.client.get_input_entity(sender_id)
                     except ValueError:
@@ -1220,6 +1227,21 @@ class UserClient:
                                 return sender
             except Exception as e:
                 logger.warning(f"Escaneo de {chat_id} para {sender_id}: {e}")
+        return None
+
+    async def _get_chat_entity(self, chat_id):
+        """Resuelve la entity de un chat monitorizado tolerando los formatos
+        de id que llegan de la BD (negativo, -100…, positivo bare)."""
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return None
+        bare, ptype = utils.resolve_id(chat_id)
+        for cand in (chat_id, ptype(bare), tl_types.PeerChannel(bare)):
+            try:
+                return await self.client.get_entity(cand)
+            except Exception:
+                continue
         return None
 
     async def start_dialog_with_lead(self, lead_id: int) -> bool:

@@ -507,6 +507,17 @@ async def get_pending_outreach_targets(limit: int = 10,
             return [dict(r) for r in await cursor.fetchall()]
 
 
+async def get_outreach_target_by_sender(sender_id: int) -> dict | None:
+    """Возвращает запись outreach_targets для sender_id (имя/username для резолва)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM outreach_targets WHERE sender_id = ?", (sender_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
 async def claim_outreach_target(target_id: int, claimer: str) -> bool:
     """Атомарный захват кандидата перед отправкой (мульти-аккаунт).
     True — цель захвачена этим процессом, False — уже занята другим."""

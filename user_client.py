@@ -6,7 +6,7 @@ import hashlib
 import re
 import time
 from datetime import datetime
-from telethon import TelegramClient, events, connection
+from telethon import TelegramClient, events, connection, utils
 from telethon.tl.custom import Message
 from telethon.tl import types as tl_types
 from telethon.errors import PeerFloodError, FloodWaitError
@@ -485,7 +485,8 @@ class UserClient:
             return "failed"
 
         await self._forum_cooldown()
-        success = await self._send_message(sender_id, text)
+        success = await self._send_message(
+            sender_id, text, via_chat_id=target.get("chat_id"))
         if not success:
             return "failed"
 
@@ -1125,10 +1126,13 @@ class UserClient:
             "иначе Telegram может посчитать это спам-рассылкой и заблокировать аккаунт."
         )
 
-    async def _send_message(self, sender_id: int, text: str, fast: bool = False):
+    async def _send_message(self, sender_id: int, text: str, fast: bool = False,
+                            via_chat_id: int | None = None):
         """Отправка сообщения с анти-бан проверками.
-        
+
         fast=True — пропуск долгой паузы перед действием (для пользовательских команд).
+        via_chat_id — чат, через который резолвится юзер, если акк его не «видел»
+        (нужно для целей, собранных другими сессиями на другом сервере).
         """
         if self._paused:
             logger.warning("Отправка заблокирована: исходящие выключены владельцем")
@@ -1143,7 +1147,15 @@ class UserClient:
         try:
             entity = self._input_peers.get(sender_id)
             if entity is None:
-                entity = await self.client.get_input_entity(sender_id)
+                try:
+                    entity = await self.client.get_input_entity(sender_id)
+                except ValueError:
+                    entity = None
+            if entity is None and via_chat_id:
+                entity = await self._resolve_user_via_chats(sender_id, via_chat_id)
+            if entity is None:
+                logger.error(f"Нет access_hash для {sender_id} — отправка пропущена")
+                return False
             # Видимый статус «печатает…» на время имитации набора текста
             async with self.client.action(entity, 'typing'):
                 await self.anti_ban.wait_typing(text)
@@ -1160,6 +1172,55 @@ class UserClient:
         except Exception as e:
             logger.error(f"Ошибка отправки сообщения: {e}")
             return False
+
+    async def _resolve_user_via_chats(self, sender_id: int, origin_chat_id):
+        """Resuelve access_hash de un usuario que el acct aún no ha «visto».
+        Intenta el filtro from_user en el chat origen; si no, escanea mensajes
+        recientes en el chat origen y luego en todos los chats monitorizados
+        (Telegram devuelve los objetos `user` junto a los mensajes y Telethon
+        los cachea en la sesión)."""
+        chat_ids = [origin_chat_id]
+        chat_ids += [cid for cid in self._monitored_chat_ids if cid != origin_chat_id]
+        for chat_id in chat_ids:
+            try:
+                chat_id = int(chat_id)
+                bare, ptype = utils.resolve_id(chat_id)
+                chat_entity = None
+                for cand in (chat_id, ptype(bare), tl_types.PeerChannel(bare)):
+                    try:
+                        chat_entity = await self.client.get_entity(cand)
+                        break
+                    except Exception:
+                        continue
+                if chat_entity is None:
+                    continue
+            except Exception as e:
+                logger.warning(f"Resolviendo {sender_id}: chat {chat_id} inaccesible: {e}")
+                continue
+            try:
+                # Ruta rápida: el filtro from_user puede funcionar si Telegram
+                # resuelve el id en el contexto del peer
+                async for msg in self.client.iter_messages(chat_entity, from_user=sender_id, limit=1):
+                    try:
+                        return await self.client.get_input_entity(sender_id)
+                    except ValueError:
+                        pass
+                    break
+            except Exception:
+                pass
+            try:
+                # Escaneo cliente-side del historial reciente
+                async for msg in self.client.iter_messages(chat_entity, limit=300):
+                    if msg.sender_id == sender_id:
+                        try:
+                            return await self.client.get_input_entity(sender_id)
+                        except ValueError:
+                            sender = await msg.get_sender()
+                            if sender:
+                                return sender
+            except Exception as e:
+                logger.warning(f"Escaneo de {chat_id} para {sender_id}: {e}")
+        return None
 
     async def start_dialog_with_lead(self, lead_id: int) -> bool:
         """Начало диалога с лидом: AI генерирует варианты первого сообщения (A/B), выбирает лучший и отправляет."""

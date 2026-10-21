@@ -30,7 +30,7 @@ SAMPLE_MESSAGES = 30
 ACTIVITY_WINDOW_H = 48
 MIN_MSGS_IN_WINDOW = 8
 
-KEYWORDS = [
+KEYWORDS = [k.strip() for k in os.getenv("HUNT_KEYWORDS", "").split("|") if k.strip()] or [
     # RU
     "ищу разработчика", "нужен сайт", "заказ на разработку",
     "ищу программиста", "разработка сайта", "телеграм бот на заказ",

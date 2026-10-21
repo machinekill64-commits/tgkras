@@ -439,6 +439,22 @@ class UserClient:
         except Exception as e:
             logger.error(f"Ошибка сбора кандидата на приглашение: {e}")
 
+    @staticmethod
+    def _looks_like_business_name(name: str) -> bool:
+        """Имя похоже на магазин/сервис/автоответчик, а не на человека."""
+        if not name:
+            return False
+        biz_words = (r"delivery|deli|shop|store|market|opt|sales?|service|"
+                     r"доставка|магазин|сервис|услуги|опт\b|заказ|прайс|шоп|"
+                     r"маркет|салон|офис|компания")
+        if re.search(rf"(?i)\b({biz_words})", name):
+            return True
+        # Полностью заглавная латиница из 2+ слов — типичный бренд
+        letters = re.sub(r"[^A-Za-zА-Яа-я ]", "", name).strip()
+        if " " in letters and re.fullmatch(r"[A-Z ]{4,}", letters):
+            return True
+        return False
+
     async def send_forum_invite(self, target: dict) -> str:
         """Отправка приглашения на форум активному участнику.
         Возвращает статус: 'sent' | 'skipped' | 'limited' | 'failed'.
@@ -454,6 +470,12 @@ class UserClient:
             return "skipped"
         if not await self.anti_ban.can_send_cold():
             return "limited"
+
+        # Имя-бренд/магазин — это не женщина-кандидат, а автоответчик
+        sender_name = target.get("sender_name") or ""
+        if self._looks_like_business_name(sender_name):
+            logger.info(f"Кандидат {sender_name} — имя-бренд/магазин, пропуск")
+            return "skipped"
 
         # Предварительная проверка пола по имени и грамматике сообщений
         gender = await ai_engine.detect_person_gender(
@@ -918,6 +940,22 @@ class UserClient:
         if dialog.get("stage") == "ENDED":
             return
 
+        # Автоответчик/бот-магазин: одно и то же сообщение приходит
+        # повторно — закрываем без ответа, чтобы не кормить AI впустую
+        normalized = re.sub(r"\s+", " ", client_message.strip().lower())
+        if len(normalized) >= 15:
+            repeats = sum(
+                1 for m in messages
+                if m.get("role") == "user"
+                and re.sub(r"\s+", " ", str(m.get("content") or "").strip().lower())
+                == normalized)
+            if repeats >= 2:
+                await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
+                await db.update_dialog_stage(dialog["id"], "ENDED")
+                logger.info(f"Форумный диалог #{dialog['id']}: повторяющиеся "
+                            f"сообщения — похоже на автоответчик, завершён")
+                return
+
         if re.search(r"(?i)(не\s*(надо|нужно|интересно|пишите|беспоко|звоните)|"
                      r"отстань|спам|стоп|отпишись|хватит)", client_message):
             await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
@@ -959,10 +997,15 @@ class UserClient:
             logger.info(f"Форумный диалог #{dialog['id']}: прощание — завершён")
             return
 
-        # Готова купить — шлём ссылку+промокод+атмосферу и уведомляем владельца
-        if re.search(r"(?i)(готова?|давайте|купить|куплю|оплатить|записать|"
-                     r"зарегистри|беру билет|приду|буду участв|иду на форум)",
-                     client_message):
+        # Готова купить — шлём ссылку+промокод+атмосферу и уведомляем владельца.
+        # Явный интент покупки: «готова» только жен. род с границей слова
+        # («вы готовы к оплате» не считается), «давай» — только со ссылкой/билетом.
+        if re.search(
+                r"(?i)\b(готова\b|куплю|оплачу|оплатить|купить|беру\s+билет|"
+                r"запиши(?:те|сь|усь)|зарегистриру\w+|приду\b|буду\s+участв|"
+                r"иду\s+на\s+форум|хочу\s+(?:билет|попасть|прийти|купить)|"
+                r"давай(?:те)?\s+(?:ссылку|билет|промокод|промо|регистраци\w+))",
+                client_message):
             closing = FORUM_CLOSING_TEXT.format(
                 url=FORUM_TICKET_URL, promo=FORUM_PROMO_CODE,
                 discount=FORUM_DISCOUNT, instagram=FORUM_INSTAGRAM,

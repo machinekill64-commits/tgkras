@@ -441,7 +441,8 @@ class UserClient:
 
     @staticmethod
     def _looks_like_business_name(name: str) -> bool:
-        """Имя похоже на магазин/сервис/автоответчик, а не на человека."""
+        """Имя похоже на магазин/сервис/автоответчик или скам-акк,
+        а не на человека."""
         if not name:
             return False
         biz_words = (r"delivery|deli|shop|store|market|opt|sales?|service|"
@@ -452,6 +453,10 @@ class UserClient:
         # Полностью заглавная латиница из 2+ слов — типичный бренд
         letters = re.sub(r"[^A-Za-zА-Яа-я ]", "", name).strip()
         if " " in letters and re.fullmatch(r"[A-Z ]{4,}", letters):
+            return True
+        # Сердечки/губы/огонь в имени или декоративные буквы-модификаторы —
+        # типичная приманка скам-редирект аккаунтов
+        if re.search(r"[💋❤😘🔥💦💞🥹]|ᴧ|ʍ|[ᴋᴇʏᴏᴘᴛᴄᴀʙɢʜɪᴊʟᴍɴᴜᴠᴡᴢ]", name):
             return True
         return False
 
@@ -938,6 +943,19 @@ class UserClient:
 
         # Диалог закрыт (отказ/стоп-слова/закрытие) — молчим, не отвечаем
         if dialog.get("stage") == "ENDED":
+            return
+
+        # Скам-редирект: в ответе ссылка на другой акк/чат («пиши на основу»,
+        # «отпиши работодателю», t.me/…) — реальные лиды так не отвечают
+        if re.search(
+                r"(?i)(t\.me/\S+|joinchat|пиши\s+(мне\s+)?на\s+основ\w*|"
+                r"основн\w*\s+профил|отпиши(?:те)?\s+.{0,30}(https?|@)|"
+                r"жд[её]т\s+(ваш|тво[ёея])\s+сообщени|свободна\s*,?\s*пиши|"
+                r"не\s+хочу\s+тебя\s+потерять)",
+                client_message):
+            await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
+            await db.update_dialog_stage(dialog["id"], "ENDED")
+            logger.info(f"Форумный диалог #{dialog['id']}: скам-редирект — закрыт")
             return
 
         # Автоответчик/бот-магазин: одно и то же сообщение приходит

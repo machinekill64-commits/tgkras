@@ -21,7 +21,7 @@ from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.functions.folders import EditPeerFoldersRequest
 from telethon.tl.types import InputPeerNotifySettings, InputFolderPeer
 
-USERNAMES = [
+USERNAMES = [u.strip() for u in os.getenv("JOIN_USERNAMES", "").split("|") if u.strip()] or [
     "JOBAlertBechlor",
     "hire_developers2",
     "freelance_vacancies_jobs",

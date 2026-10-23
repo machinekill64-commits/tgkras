@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS dialogs (
     handoff_notified INTEGER DEFAULT 0,
     ready_to_work INTEGER DEFAULT 0,
     do_not_contact INTEGER DEFAULT 0,
+    end_reason TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (lead_id) REFERENCES leads(id)
@@ -311,6 +312,7 @@ async def _migrate_dialogs(db):
         "handoff_notified": "INTEGER DEFAULT 0",
         "ready_to_work": "INTEGER DEFAULT 0",
         "do_not_contact": "INTEGER DEFAULT 0",
+        "end_reason": "TEXT",
     }
     for name, definition in additions.items():
         if name not in columns:
@@ -616,7 +618,8 @@ async def get_forum_leads(hot_only: bool = False, limit: int = 100) -> list[dict
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"""SELECT sender_id, sender_name, sender_username, stage,
-                       interest_level, ready_to_work, updated_at, created_at
+                       interest_level, ready_to_work, updated_at, created_at,
+                       end_reason
                 FROM dialogs {where}
                 ORDER BY updated_at DESC LIMIT ?""",
             (limit,),
@@ -912,12 +915,18 @@ async def get_dialog_by_sender(sender_id: int) -> dict | None:
             return dict(row) if row else None
 
 
-async def update_dialog_stage(dialog_id: int, stage: str):
+async def update_dialog_stage(dialog_id: int, stage: str, reason: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE dialogs SET stage = ?, updated_at = datetime('now') WHERE id = ?",
-            (stage, dialog_id)
-        )
+        if reason:
+            await db.execute(
+                "UPDATE dialogs SET stage = ?, end_reason = ?, updated_at = datetime('now') WHERE id = ?",
+                (stage, reason, dialog_id)
+            )
+        else:
+            await db.execute(
+                "UPDATE dialogs SET stage = ?, updated_at = datetime('now') WHERE id = ?",
+                (stage, dialog_id)
+            )
         await db.commit()
 
 

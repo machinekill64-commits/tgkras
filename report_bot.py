@@ -75,7 +75,8 @@ def _stage_label(d: dict) -> str:
     if d.get("interest_level") == "WARM":
         return "🤔 тёплая — получила ссылку, интересовалась"
     if d.get("stage") == "ENDED":
-        return "⛔ диалог завершён"
+        reason = d.get("end_reason")
+        return f"⛔ диалог завершён — {reason}" if reason else "⛔ диалог завершён"
     if d.get("stage") == "FORUM_OPENER":
         return "⏳ приглашение отправлено, ждём ответ"
     return "💬 в диалоге"
@@ -164,6 +165,8 @@ async def _cmd_leads(message: Message):
         line = f"{tag} {name}"
         if uname:
             line += f" @{uname}"
+        if tag == "⛔" and d.get("end_reason"):
+            line += f" — {d['end_reason']}"
         line += f"  ({dt})"
         chunk.append(line)
         if len(chunk) >= 20:

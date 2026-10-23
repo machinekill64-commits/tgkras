@@ -814,13 +814,14 @@ class UserClient:
 
         if intent == "DO_NOT_CONTACT":
             await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
-            await db.update_dialog_stage(dialog["id"], "ENDED")
+            await db.update_dialog_stage(dialog["id"], "ENDED", "просила не писать")
             logger.info(f"Диалог #{dialog['id']} закрыт: запрет дальнейшего контакта")
             return
 
         if intent == "HARD_REFUSAL":
             await self._send_and_record(
-                dialog, messages, "Понял, спасибо за прямой ответ. Больше не буду отвлекать.", "ENDED"
+                dialog, messages, "Понял, спасибо за прямой ответ. Больше не буду отвлекать.", "ENDED",
+                reason="отказ"
             )
             return
 
@@ -828,7 +829,7 @@ class UserClient:
             await self._send_and_record(
                 dialog, messages,
                 "Спасибо, что уточнили. К сожалению, сейчас мы не работаем с вашим регионом. Всего доброго.",
-                "ENDED",
+                "ENDED", reason="не Краснодар"
             )
             return
 
@@ -986,7 +987,7 @@ class UserClient:
                 r"не\s+хочу\s+тебя\s+потерять)",
                 client_message):
             await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
-            await db.update_dialog_stage(dialog["id"], "ENDED")
+            await db.update_dialog_stage(dialog["id"], "ENDED", "скам")
             logger.info(f"Форумный диалог #{dialog['id']}: скам-редирект — закрыт")
             return
 
@@ -1001,7 +1002,7 @@ class UserClient:
                 == normalized)
             if repeats >= 2:
                 await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
-                await db.update_dialog_stage(dialog["id"], "ENDED")
+                await db.update_dialog_stage(dialog["id"], "ENDED", "автоответчик")
                 logger.info(f"Форумный диалог #{dialog['id']}: повторяющиеся "
                             f"сообщения — похоже на автоответчик, завершён")
                 return
@@ -1022,7 +1023,7 @@ class UserClient:
                 client_message)
             if male_signals:
                 await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
-                await db.update_dialog_stage(dialog["id"], "ENDED")
+                await db.update_dialog_stage(dialog["id"], "ENDED", "мужчина")
                 logger.info(f"Форумный диалог #{dialog['id']}: мужская грамматика "
                             f"«я + муж.род» — завершён")
                 return
@@ -1046,7 +1047,7 @@ class UserClient:
         if re.search(r"(?i)(не\s*(надо|нужно|интересно|пишите|беспоко|звоните)|"
                      r"отстань|спам|стоп|отпишись|хватит)", client_message):
             await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
-            await db.update_dialog_stage(dialog["id"], "ENDED")
+            await db.update_dialog_stage(dialog["id"], "ENDED", "просила не писать")
             logger.info(f"Форумный диалог #{dialog['id']} закрыт по просьбе клиента")
             return
 
@@ -1064,9 +1065,9 @@ class UserClient:
                 and refusal_re.search(str(m.get("content") or "")))
             if refusals >= 2 or farewell_re.search(client_message):
                 decline = FORUM_DECLINE_TEXT.format(promo=FORUM_PROMO_CODE)
-                await self._send_and_record(dialog, messages, decline, "ENDED")
+                await self._send_and_record(dialog, messages, decline, "ENDED", reason="отказ")
                 await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
-                await db.update_dialog_stage(dialog["id"], "ENDED")
+                await db.update_dialog_stage(dialog["id"], "ENDED", "отказ")
                 logger.info(f"Форумный диалог #{dialog['id']}: повторный отказ — завершён")
                 return
             # Первый отказ — деликатная попытка отработать возражение через AI
@@ -1078,9 +1079,9 @@ class UserClient:
                            "решение. Не дави и не прощайся."})
         elif farewell_re.search(client_message):
             decline = FORUM_DECLINE_TEXT.format(promo=FORUM_PROMO_CODE)
-            await self._send_and_record(dialog, messages, decline, "ENDED")
+            await self._send_and_record(dialog, messages, decline, "ENDED", reason="отказ")
             await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
-            await db.update_dialog_stage(dialog["id"], "ENDED")
+            await db.update_dialog_stage(dialog["id"], "ENDED", "отказ")
             logger.info(f"Форумный диалог #{dialog['id']}: прощание — завершён")
             return
 
@@ -1216,7 +1217,7 @@ class UserClient:
         await asyncio.sleep(delay)
 
     async def _send_and_record(self, dialog: dict, messages: list[dict], text: str,
-                               stage: str) -> bool:
+                               stage: str, reason: str = None) -> bool:
         import random
         if dialog.get("lead_source") == "forum_outreach":
             await self._forum_cooldown()
@@ -1231,7 +1232,7 @@ class UserClient:
             return False
         messages.append({"role": "assistant", "content": text})
         await db.update_dialog_messages(dialog["id"], json.dumps(messages, ensure_ascii=False))
-        await db.update_dialog_stage(dialog["id"], stage)
+        await db.update_dialog_stage(dialog["id"], stage, reason)
         return True
 
     async def _notify_human_required(self, dialog: dict, message_text: str, reason: str):
@@ -1604,7 +1605,7 @@ class UserClient:
         # Автоотправка отключена (FORUM_FOLLOWUP_ENABLED=0): пропускаем диалог.
         if dialog.get("lead_source") == "forum_outreach":
             if not FORUM_FOLLOWUP_ENABLED or not FORUM_FOLLOWUP_TEXT:
-                await db.update_dialog_stage(dialog["id"], "ENDED")
+                await db.update_dialog_stage(dialog["id"], "ENDED", "нет ответа")
                 logger.info(f"Follow-up выключен — диалог #{dialog['id']} завершён без напоминания")
                 return False
             followup_msg = FORUM_FOLLOWUP_TEXT.format(

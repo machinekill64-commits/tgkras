@@ -809,7 +809,7 @@ class NotificationBot:
             if callback.from_user.id != OWNER_TG_ID:
                 return
             dialog_id = int(callback.data.split("_")[1])
-            await db.update_dialog_stage(dialog_id, "ENDED")
+            await db.update_dialog_stage(dialog_id, "ENDED", "передан владельцу")
             await callback.answer("Диалог передан вам")
             await callback.message.edit_text(
                 callback.message.text + "\n\n👤 Диалог передан вам. Общайтесь напрямую.",

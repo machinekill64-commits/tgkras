@@ -602,7 +602,7 @@ async def get_forum_report() -> dict:
         return stats
 
 
-async def get_forum_leads(hot_only: bool = False, limit: int = 15) -> list[dict]:
+async def get_forum_leads(hot_only: bool = False, limit: int = 100) -> list[dict]:
     """Форумные диалоги для отчёта: имя, контакт, стадия, интерес."""
     from config import REPORT_EXCLUDE_SENDER_IDS
     excl = ",".join(str(x) for x in REPORT_EXCLUDE_SENDER_IDS) or "0"

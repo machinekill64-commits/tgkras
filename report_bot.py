@@ -117,7 +117,12 @@ async def _cmd_leads(message: Message):
     if not leads:
         await message.answer("Диалогов пока нет — рассылка приглашений ещё не начата.")
         return
-    await message.answer(f"📋 Последние диалоги ({len(leads)}):")
+    total = len(leads)
+    hot = sum(1 for d in leads if d.get("interest_level") == "HOT")
+    ended = sum(1 for d in leads if d.get("stage") == "ENDED")
+    await message.answer(
+        f"📋 Все диалоги: {total} шт\n"
+        f"   🔥 HOT: {hot} | ⛔ завершён: {ended} | ⏳ активных: {total - ended}")
     for d in leads:
         name = d.get("sender_name") or "—"
         uname = d.get("sender_username")

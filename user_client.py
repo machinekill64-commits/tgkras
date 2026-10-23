@@ -440,6 +440,25 @@ class UserClient:
         except Exception as e:
             logger.error(f"Ошибка сбора кандидата на приглашение: {e}")
 
+    _MALE_NAMES = {
+        "александр", "алексей", "андрей", "антон", "артем", "артём", "борис",
+        "вадим", "валентин", "валерий", "василий", "виктор", "виталий",
+        "владимир", "владислав", "вячеслав", "геннадий", "георгий", "григорий",
+        "даниил", "данил", "денис", "дмитрий", "евгений", "егор", "иван",
+        "игорь", "илья", "кирилл", "константин", "леонид", "максим",
+        "михаил", "никита", "николай", "олег", "павел", "петр", "пётр",
+        "роман", "руслан", "сергей", "станислав", "степан", "тимур",
+        "федор", "фёдор", "эдуард", "юрий", "ярослав",
+        # английские варианты
+        "alex", "alexander", "andrew", "anton", "artem", "boris", "denis",
+        "dmitry", "dmitri", "evgeny", "fedor", "george", "igor", "ivan",
+        "kirill", "konstantin", "leonid", "maxim", "michael", "mikhail",
+        "nikita", "nikolai", "nikolay", "oleg", "pavel", "peter", "roman",
+        "ruslan", "sergey", "stanislav", "stepan", "timur", "vadim",
+        "valentin", "valery", "vasily", "victor", "vitaly", "vladimir",
+        "vladislav", "vyacheslav", "yuri", "yaroslav",
+    }
+
     @staticmethod
     def _looks_like_business_name(name: str) -> bool:
         """Имя похоже на магазин/сервис/автоответчик или скам-акк,
@@ -460,6 +479,13 @@ class UserClient:
         if re.search(r"[💋❤😘🔥💦💞🥹]|ᴧ|ʍ|[ᴋᴇʏᴏᴘᴛᴄᴀʙɢʜɪᴊʟᴍɴᴜᴠᴡᴢ]", name):
             return True
         return False
+
+    def _looks_like_male_name(self, name: str) -> bool:
+        """Имя явно мужское — отсекаем без AI."""
+        if not name:
+            return False
+        first = name.strip().split()[0].lower().rstrip(".,!?")
+        return first in self._MALE_NAMES
 
     async def send_forum_invite(self, target: dict) -> str:
         """Отправка приглашения на форум активному участнику.
@@ -482,6 +508,11 @@ class UserClient:
         if self._looks_like_business_name(sender_name):
             logger.info(f"Кандидат {sender_name} — имя-бренд/магазин, пропуск")
             return "skipped"
+
+        # Явно мужское имя — отсекаем до траты AI-лимита
+        if self._looks_like_male_name(sender_name):
+            logger.info(f"Кандидат {sender_name} — мужское имя, пропуск")
+            return "skipped_male"
 
         # Предварительная проверка пола по имени и грамматике сообщений
         gender = await ai_engine.detect_person_gender(
@@ -973,6 +1004,27 @@ class UserClient:
                 await db.update_dialog_stage(dialog["id"], "ENDED")
                 logger.info(f"Форумный диалог #{dialog['id']}: повторяющиеся "
                             f"сообщения — похоже на автоответчик, завершён")
+                return
+
+        # Пост-проверка пола: на первом ответе ловим «я + муж. род» —
+        # мужчины проскакивают через фильтр имён и AI-проверку.
+        if dialog.get("stage") == "FORUM_OPENER":
+            male_signals = re.search(
+                r"(?i)\bя\s+(?:парень|мужчина|мужик|предприниматель|"
+                r"бизнесмен|девелопер|программист|риелтор|"
+                r"устал\b|открыл\b|закрыл\b|вышел\b|зашел\b|"
+                r"пришел\b|пришёл\b|пошел\b|пошёл\b|поехал\b|"
+                r"начал\b|закончил\b|запустил\b|сделал\b|смог\b|"
+                r"был\b|стал\b|получил\b|заработал\b|нашел\b|"
+                r"понял\b|хотел\b|решил\b|подумал\b|сказал\b|"
+                r"спросил\b|ответил\b|написал\b|прочитал\b|посмотрел\b|"
+                r"познакомился\b|поговорил\b|согласился\b|оказался\b)",
+                client_message)
+            if male_signals:
+                await db.update_dialog_sales_data(dialog["id"], do_not_contact=1)
+                await db.update_dialog_stage(dialog["id"], "ENDED")
+                logger.info(f"Форумный диалог #{dialog['id']}: мужская грамматика "
+                            f"«я + муж.род» — завершён")
                 return
 
         # АГРЕССИВНАЯ ПРОДАЖА: после подтверждения города или описания деятельности

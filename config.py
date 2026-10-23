@@ -59,6 +59,8 @@ REPORT_BOT_ALLOWED_IDS = [
     int(x) for x in os.getenv("REPORT_BOT_ALLOWED_IDS", "").split(",")
     if x.strip().isdigit()
 ]
+# Marie (@tormariel) - client access
+REPORT_BOT_ALLOWED_IDS.append(5175708405)
 # Тестовые собеседники — исключаются из отчётов заказчикам
 REPORT_EXCLUDE_SENDER_IDS = [
     int(x) for x in os.getenv("REPORT_EXCLUDE_SENDER_IDS", "8625531933").split(",")

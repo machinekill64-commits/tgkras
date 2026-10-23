@@ -1074,6 +1074,10 @@ class UserClient:
         if unresolved:
             await self._notify_human_required(
                 dialog, client_message, "Нестандартный вопрос в форумном диалоге")
+        if "price" in intents:
+            await self._notify_human_required(
+                dialog, client_message,
+                "Лид спрашивает цену — интерес к покупке")
 
     def _forum_detect_intents(self, text: str) -> list[str]:
         """Все интенты сообщения (мульти-интент), в порядке приоритета шаблонов."""

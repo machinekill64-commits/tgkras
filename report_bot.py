@@ -62,7 +62,8 @@ def _main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📊 Отчёт")],
-            [KeyboardButton(text="🔥 Уговоренные"), KeyboardButton(text="📋 Все лиды")],
+            [KeyboardButton(text="🔥 Уговоренные"), KeyboardButton(text="🤔 Тёплые")],
+            [KeyboardButton(text="📋 Все лиды")],
         ],
         resize_keyboard=True,
     )
@@ -71,6 +72,8 @@ def _main_keyboard() -> ReplyKeyboardMarkup:
 def _stage_label(d: dict) -> str:
     if d.get("interest_level") == "HOT":
         return "🔥 согласна — получила ссылку и промокод"
+    if d.get("interest_level") == "WARM":
+        return "🤔 тёплая — получила ссылку, интересовалась"
     if d.get("stage") == "ENDED":
         return "⛔ диалог завершён"
     if d.get("stage") == "FORUM_OPENER":
@@ -89,6 +92,7 @@ async def _cmd_report(message: Message):
         f"📨 Отправлено приглашений: {sent}\n"
         f"💬 Ответили и в диалоге: {stats['replied']}\n"
         f"🔥 Уговорены (получили билетную ссылку): {stats['hot']}\n"
+        f"🤔 Тёплые (получили ссылку, интересовались): {stats.get('warm', 0)}\n"
         f"⛔ Завершено без интереса: {stats['ended']}\n"
     )
     await message.answer(text)
@@ -112,27 +116,53 @@ async def _cmd_hot(message: Message):
         await message.answer(line, reply_markup=kb)
 
 
-async def _cmd_leads(message: Message):
-    leads = await db.get_forum_leads(hot_only=False)
-    if not leads:
-        await message.answer("Диалогов пока нет — рассылка приглашений ещё не начата.")
+async def _cmd_warm(message: Message):
+    leads = await db.get_forum_leads(hot_only=False, limit=100)
+    warm = [d for d in leads if d.get("interest_level") == "WARM"]
+    if not warm:
+        await message.answer("Пока нет тёплых лидов. Как только клиент получит ссылку и проявит интерес — появится здесь.")
         return
-    total = len(leads)
-    hot = sum(1 for d in leads if d.get("interest_level") == "HOT")
-    ended = sum(1 for d in leads if d.get("stage") == "ENDED")
-    await message.answer(
-        f"📋 Все диалоги: {total} шт\n"
-        f"   🔥 HOT: {hot} | ⛔ завершён: {ended} | ⏳ активных: {total - ended}")
-    for d in leads:
+    await message.answer(f"🤔 Тёплые лиды ({len(warm)}):")
+    for d in warm:
         name = d.get("sender_name") or "—"
         uname = d.get("sender_username")
-        line = f"• {name}"
+        line = f"🤔 {name}"
         if uname:
             line += f" (@{uname})"
         line += f"\n   {_stage_label(d)} · {d.get('updated_at', '')[:16]}"
         btn = _contact_button(uname, d.get("sender_id"))
         kb = InlineKeyboardMarkup(inline_keyboard=[[btn]]) if btn else None
         await message.answer(line, reply_markup=kb)
+
+
+async def _cmd_leads(message: Message):
+    leads = await db.get_forum_leads(hot_only=False, limit=200)
+    if not leads:
+        await message.answer("Диалогов пока нет — рассылка приглашений ещё не начата.")
+        return
+    total = len(leads)
+    hot = sum(1 for d in leads if d.get("interest_level") == "HOT")
+    warm = sum(1 for d in leads if d.get("interest_level") == "WARM")
+    ended = sum(1 for d in leads if d.get("stage") == "ENDED")
+    await message.answer(
+        f"📋 Все диалоги: {total} шт\n"
+        f"   🔥 HOT: {hot} | 🤔 WARM: {warm} | ⛔ завершён: {ended} | ⏳ активных: {total - ended}")
+    # Компактно — до 20 лидов на сообщение
+    chunk = []
+    for d in leads:
+        name = d.get("sender_name") or "—"
+        uname = d.get("sender_username")
+        lvl = d.get("interest_level") or ""
+        tag = "🔥" if lvl == "HOT" else ("🤔" if lvl == "WARM" else "⛔" if d.get("stage") == "ENDED" else "⏳")
+        line = f"{tag} {name}"
+        if uname:
+            line += f" @{uname}"
+        chunk.append(line)
+        if len(chunk) >= 20:
+            await message.answer("\n".join(chunk))
+            chunk = []
+    if chunk:
+        await message.answer("\n".join(chunk))
 
 
 async def notify_hot_lead(bot: Bot, dialog: dict):
@@ -171,6 +201,7 @@ class ReportBot:
                 "🤖 Отчётный бот кампании «Форум „Современная женщина“».\n\n"
                 "«📊 Отчёт» — сводка: найдено, отправлено, в диалоге, уговорены.\n"
                 "«🔥 Уговоренные» — клиенты, согласившиеся купить билет (с контактами).\n"
+                "«🤔 Тёплые» — получили ссылку, интересовались.\n"
                 "«📋 Все лиды» — все диалоги.\n\n"
                 "О новых уговоренных присылаю уведомление автоматически.",
                 reply_markup=_main_keyboard())
@@ -184,6 +215,11 @@ class ReportBot:
         async def btn_hot(message: Message):
             if _allowed(message.from_user.id):
                 await _cmd_hot(message)
+
+        @self.dp.message(F.text == "🤔 Тёплые")
+        async def btn_warm(message: Message):
+            if _allowed(message.from_user.id):
+                await _cmd_warm(message)
 
         @self.dp.message(F.text == "📋 Все лиды")
         async def btn_leads(message: Message):

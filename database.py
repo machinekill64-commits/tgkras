@@ -610,6 +610,8 @@ async def get_forum_leads(hot_only: bool = False, limit: int = 100) -> list[dict
              f"AND sender_id NOT IN ({excl})")
     if hot_only:
         where += " AND interest_level = 'HOT'"
+    else:
+        where += " AND (interest_level IS NULL OR interest_level != 'BAD')"
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(

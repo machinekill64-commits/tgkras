@@ -20,6 +20,7 @@ from config import (TG_API_ID, TG_API_HASH, TG_PHONE, TG_SESSION_NAME,
                     FORUM_FOLLOWUP_ENABLED,
                     FORUM_OPENER_VARIANTS,
                     FORUM_DECLINE_TEXT,
+                    FORUM_DIRECT_INVITE,
                     FORUM_MSG_COOLDOWN_MIN, FORUM_MSG_COOLDOWN_MAX,
                     DIALOG_REPLY_DELAY_MIN, DIALOG_REPLY_DELAY_MAX,
                     FORUM_REPLY_TEMPLATES, FORUM_SPEAKERS, FORUM_PROGRAM, FORUM_TIME,
@@ -973,6 +974,22 @@ class UserClient:
                 logger.info(f"Форумный диалог #{dialog['id']}: повторяющиеся "
                             f"сообщения — похоже на автоответчик, завершён")
                 return
+
+        # АГРЕССИВНАЯ ПРОДАЖА: после подтверждения города или описания деятельности
+        # сразу даём ссылку — не ждём явного "готова"
+        city_confirm = re.search(r"(?i)(да|да\s*,?\s*из\s*краснодар|я\s*из\s*краснодар|краснодар)", client_message)
+        activity_described = len(client_message.strip()) >= 15 and not re.search(
+            r"(?i)(\?|почему|зачем|чему)", client_message)
+
+        if city_confirm or (activity_described and dialog.get("stage") == "FORUM_OPENER"):
+            direct_invite = FORUM_DIRECT_INVITE.format(
+                url=FORUM_TICKET_URL, promo=FORUM_PROMO_CODE,
+                discount=FORUM_DISCOUNT, instagram=FORUM_INSTAGRAM,
+                date=FORUM_DATE)
+            await self._send_and_record(dialog, messages, direct_invite, "FORUM_CHAT")
+            await db.update_dialog_sales_data(dialog["id"], interest_level="WARM")
+            logger.info(f"Форумный диалог #{dialog['id']}: отправлено прямое приглашение")
+            return
 
         if re.search(r"(?i)(не\s*(надо|нужно|интересно|пишите|беспоко|звоните)|"
                      r"отстань|спам|стоп|отпишись|хватит)", client_message):

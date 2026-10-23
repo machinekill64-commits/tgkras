@@ -576,6 +576,7 @@ async def get_forum_report() -> dict:
     найдено кандидатов, отправлено приглашений, ответили, уговорены."""
     from config import REPORT_EXCLUDE_SENDER_IDS
     excl = ",".join(str(x) for x in REPORT_EXCLUDE_SENDER_IDS) or "0"
+    clean = "AND (interest_level IS NULL OR interest_level != 'BAD')"
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         stats = {}
@@ -586,7 +587,7 @@ async def get_forum_report() -> dict:
         async with db.execute(
             f"""SELECT COUNT(*) c FROM dialogs
                 WHERE lead_source = 'forum_outreach' AND stage != 'FORUM_OPENER'
-                  AND sender_id NOT IN ({excl})"""
+                  AND sender_id NOT IN ({excl}) {clean}"""
         ) as cur:
             stats["replied"] = (await cur.fetchone())["c"]
         async with db.execute(
@@ -597,10 +598,23 @@ async def get_forum_report() -> dict:
             stats["hot"] = (await cur.fetchone())["c"]
         async with db.execute(
             f"""SELECT COUNT(*) c FROM dialogs
-                WHERE lead_source = 'forum_outreach' AND stage = 'ENDED'
+                WHERE lead_source = 'forum_outreach' AND interest_level = 'WARM'
                   AND sender_id NOT IN ({excl})"""
         ) as cur:
+            stats["warm"] = (await cur.fetchone())["c"]
+        async with db.execute(
+            f"""SELECT COUNT(*) c FROM dialogs
+                WHERE lead_source = 'forum_outreach' AND stage = 'ENDED'
+                  AND sender_id NOT IN ({excl}) {clean}"""
+        ) as cur:
             stats["ended"] = (await cur.fetchone())["c"]
+        async with db.execute(
+            f"""SELECT COALESCE(end_reason, 'завершён') r, COUNT(*) c FROM dialogs
+                WHERE lead_source = 'forum_outreach' AND stage = 'ENDED'
+                  AND sender_id NOT IN ({excl}) {clean}
+                GROUP BY r ORDER BY c DESC"""
+        ) as cur:
+            stats["ended_reasons"] = {r["r"]: r["c"] for r in await cur.fetchall()}
         return stats
 
 

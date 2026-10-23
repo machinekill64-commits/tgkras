@@ -70,13 +70,13 @@ def _main_keyboard() -> ReplyKeyboardMarkup:
 
 
 def _stage_label(d: dict) -> str:
+    if d.get("stage") == "ENDED":
+        reason = d.get("end_reason")
+        return f"⛔ диалог завершён — {reason}" if reason else "⛔ диалог завершён"
     if d.get("interest_level") == "HOT":
         return "🔥 согласна — получила ссылку и промокод"
     if d.get("interest_level") == "WARM":
         return "🤔 тёплая — получила ссылку, интересовалась"
-    if d.get("stage") == "ENDED":
-        reason = d.get("end_reason")
-        return f"⛔ диалог завершён — {reason}" if reason else "⛔ диалог завершён"
     if d.get("stage") == "FORUM_OPENER":
         return "⏳ приглашение отправлено, ждём ответ"
     return "💬 в диалоге"
@@ -94,8 +94,11 @@ async def _cmd_report(message: Message):
         f"💬 Ответили и в диалоге: {stats['replied']}\n"
         f"🔥 Уговорены (получили билетную ссылку): {stats['hot']}\n"
         f"🤔 Тёплые (получили ссылку, интересовались): {stats.get('warm', 0)}\n"
-        f"⛔ Завершено без интереса: {stats['ended']}\n"
+        f"⛔ Завершено: {stats['ended']}\n"
     )
+    reasons = stats.get("ended_reasons") or {}
+    if reasons:
+        text += "   " + " · ".join(f"{k}: {v}" for k, v in reasons.items()) + "\n"
     await message.answer(text)
 
 
@@ -142,16 +145,16 @@ async def _cmd_leads(message: Message):
         await message.answer("Диалогов пока нет — рассылка приглашений ещё не начата.")
         return
     total = len(leads)
-    hot = sum(1 for d in leads if d.get("interest_level") == "HOT")
-    warm = sum(1 for d in leads if d.get("interest_level") == "WARM")
     ended = sum(1 for d in leads if d.get("stage") == "ENDED")
+    hot = sum(1 for d in leads if d.get("interest_level") == "HOT" and d.get("stage") != "ENDED")
+    warm = sum(1 for d in leads if d.get("interest_level") == "WARM" and d.get("stage") != "ENDED")
     await message.answer(
         f"📋 Все диалоги: {total} шт\n"
         f"   🔥 HOT: {hot} | 🤔 WARM: {warm} | ⛔ завершён: {ended} | ⏳ активных: {total - ended}\n\n"
         "Обозначения:\n"
         "🔥 — согласилась, получила ссылку и промокод\n"
         "🤔 — тёплая: интересовалась, получила ссылку\n"
-        "⛔ — диалог закрыт (отказ / не Краснодар / мужчина / скам)\n"
+        "⛔ — диалог закрыт (причина указана после имени)\n"
         "⏳ — активный: приглашение отправлено, диалог идёт\n"
         "В скобках — дата и время первого сообщения лиду")
     # Компактно — до 20 лидов на сообщение
@@ -160,7 +163,9 @@ async def _cmd_leads(message: Message):
         name = d.get("sender_name") or "—"
         uname = d.get("sender_username")
         lvl = d.get("interest_level") or ""
-        tag = "🔥" if lvl == "HOT" else ("🤔" if lvl == "WARM" else "⛔" if d.get("stage") == "ENDED" else "⏳")
+        tag = ("⛔" if d.get("stage") == "ENDED"
+               else "🔥" if lvl == "HOT"
+               else "🤔" if lvl == "WARM" else "⏳")
         dt = (d.get("created_at") or d.get("updated_at", ""))[:16]
         line = f"{tag} {name}"
         if uname:

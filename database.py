@@ -616,7 +616,7 @@ async def get_forum_leads(hot_only: bool = False, limit: int = 100) -> list[dict
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"""SELECT sender_id, sender_name, sender_username, stage,
-                       interest_level, ready_to_work, updated_at
+                       interest_level, ready_to_work, updated_at, created_at
                 FROM dialogs {where}
                 ORDER BY updated_at DESC LIMIT ?""",
             (limit,),

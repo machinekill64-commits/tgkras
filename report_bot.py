@@ -154,9 +154,11 @@ async def _cmd_leads(message: Message):
         uname = d.get("sender_username")
         lvl = d.get("interest_level") or ""
         tag = "🔥" if lvl == "HOT" else ("🤔" if lvl == "WARM" else "⛔" if d.get("stage") == "ENDED" else "⏳")
+        dt = (d.get("created_at") or d.get("updated_at", ""))[:16]
         line = f"{tag} {name}"
         if uname:
             line += f" @{uname}"
+        line += f"  ({dt})"
         chunk.append(line)
         if len(chunk) >= 20:
             await message.answer("\n".join(chunk))
